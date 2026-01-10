@@ -1,0 +1,27 @@
+pointcloud_perturber:
+  ros__parameters:
+    input_topic: "/livox/lidar"
+    output_topic: "/livox/lidar_perturbed"
+
+    gt_mask_topic: "pc_perturber/gt_mask_mono8"
+    drop_ratio_topic: "pc_perturber/drop_ratio"
+    bias_topic: "pc_perturber/bias_m"
+
+    horizontal_fov_deg: 70.4
+    vertical_fov_deg: 77.2
+    num_horizontal_bins: 128
+    num_vertical_bins: 128
+
+    enable_drop: true
+    packet_points: 100
+    drop_mode: "random"
+    drop_prob_q: 0.10
+    rng_seed: 1234
+
+    enable_spoof: false
+
+    sub_reliability: "best_effort"
+    pub_reliability: "best_effort"
+    sub_depth: 10
+    pub_depth: 10
+

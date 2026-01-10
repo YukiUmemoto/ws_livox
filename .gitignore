@@ -1,0 +1,15 @@
+# colcon / ROS2 workspace artifacts
+/build/
+/install/
+/log/
+
+# python
+__pycache__/
+*.pyc
+
+# misc
+.DS_Store
+
+# VSCode (必要なら)
+.vscode/
+/bags/

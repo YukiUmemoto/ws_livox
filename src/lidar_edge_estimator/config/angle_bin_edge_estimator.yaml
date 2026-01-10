@@ -1,0 +1,19 @@
+angle_bin_edge_estimator:
+  ros__parameters:
+    input_topic: /livox/lidar
+    horizontal_fov_deg: 70.4
+    vertical_fov_deg: 77.2
+    num_horizontal_bins: 80
+    num_vertical_bins: 80
+    temporal_ema_alpha: 0.05
+    min_expected_hits: 1.0
+    temporal_edge_threshold: 0.5
+    spatial_edge_threshold: 0.5
+    visualization_range: 10.0
+    enable_bin_pyramids: true
+    profile_enable: true
+    profile_warn_ms: 100.0
+    profile_log_period_frames: 30
+    vis_use_percentile: true
+    vis_p_low: 1.0
+    vis_p_high: 99.0

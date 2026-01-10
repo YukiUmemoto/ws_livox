@@ -1,0 +1,38 @@
+important_roi_estimator:
+  ros__parameters:
+    input_topic: "/livox/lidar_perturbed"
+
+    horizontal_fov_deg: 70.4
+    vertical_fov_deg: 77.2
+    num_horizontal_bins: 128
+    num_vertical_bins: 128
+
+    enable_temporal: true
+    ema_alpha: 0.05
+    min_expected_hits: 3.0
+    N_min_compare: 1
+
+    w_s: 0.5
+    w_t: 0.5
+    roi_top_percent: 10.0
+
+    w_m: 0.00
+    w_r: 0.50
+    w_n: 0.50
+    dr_scale_m: 0.50
+    n_floor: 1.0
+    sigmoid_beta: 8.0
+    sigmoid_center_c: 0.60
+    tau_rel: 0.80
+
+    publish_maps_as_image: true
+    publish_range_hat: false
+    publish_range_hat_as_image: true
+
+    metrics_enable: true
+    metrics_log_period_frames: 30
+
+    profile_enable: true
+    profile_log_period_frames: 30
+    profile_warn_ms: 100.0
+
