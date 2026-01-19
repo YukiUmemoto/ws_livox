@@ -158,9 +158,9 @@ class ImportantROIWithReliability(Node):
 
         # ===== Reliability (bin) =====
         self.declare_parameter("w_m", 0.4)
-        self.declare_parameter("w_r", 0.3)
+        self.declare_parameter("w_d", 0.3)
         self.declare_parameter("w_n", 0.3)
-        self.declare_parameter("dr_scale_m", 0.5)
+        self.declare_parameter("scale_d_m", 0.5)
         self.declare_parameter("n_floor", 1.0)
         self.declare_parameter("sigmoid_beta", 8.0)
         self.declare_parameter("sigmoid_center_c", 0.6)
@@ -543,32 +543,38 @@ class ImportantROIWithReliability(Node):
 
         S = np.zeros((self.V, self.H), dtype=np.float32)
 
+        # =========================================================
+        # ★修正: 空間特徴量は「観測差分のみ」で算出（期待差分による補完を廃止）
+        #       - 旧: both_obs でなければ both_exp のとき expected_prev 差分で補完
+        #       - 新: both_obs のときのみ差分を採用し，それ以外は 0
+        # =========================================================
+
+        # --- horizontal neighbor diffs (obs-only) ---
         dh_obs = np.abs(R[:, :-1] - R[:, 1:]).astype(np.float32)
-        dh_exp = np.abs(expected_prev[:, :-1] - expected_prev[:, 1:]).astype(np.float32)
         both_obs_h = (M[:, :-1] & M[:, 1:])
-        both_exp_h = (exp_valid[:, :-1] & exp_valid[:, 1:])
+
         dh = np.zeros_like(dh_obs, dtype=np.float32)
-        dh[both_obs_h] = dh_obs[both_obs_h]
-        use_exp_h = (~both_obs_h) & both_exp_h
-        dh[use_exp_h] = dh_exp[use_exp_h]
+        dh[both_obs_h] = dh_obs[both_obs_h]  # ★修正: 観測されている隣接対のみ
+
         S[:, :-1] = np.maximum(S[:, :-1], dh)
         S[:, 1:] = np.maximum(S[:, 1:], dh)
 
+        # --- vertical neighbor diffs (obs-only) ---
         dv_obs = np.abs(R[:-1, :] - R[1:, :]).astype(np.float32)
-        dv_exp = np.abs(expected_prev[:-1, :] - expected_prev[1:, :]).astype(np.float32)
         both_obs_v = (M[:-1, :] & M[1:, :])
-        both_exp_v = (exp_valid[:-1, :] & exp_valid[1:, :])
+
         dv = np.zeros_like(dv_obs, dtype=np.float32)
-        dv[both_obs_v] = dv_obs[both_obs_v]
-        use_exp_v = (~both_obs_v) & both_exp_v
-        dv[use_exp_v] = dv_exp[use_exp_v]
+        dv[both_obs_v] = dv_obs[both_obs_v]  # ★修正: 観測されている隣接対のみ
+
         S[:-1, :] = np.maximum(S[:-1, :], dv)
         S[1:, :] = np.maximum(S[1:, :], dv)
 
+        # --- temporal feature ---
         T = np.zeros((self.V, self.H), dtype=np.float32)
         if enable_temporal:
             T[compare_mask] = np.abs(R[compare_mask] - expected_prev[compare_mask]).astype(np.float32)
 
+        # 正規化（既存どおり）
         S_n = self._normalize(S, Omega)
         T_n = self._normalize(T, compare_mask) if enable_temporal else np.zeros_like(S_n)
 
@@ -593,25 +599,25 @@ class ImportantROIWithReliability(Node):
         t0 = time.perf_counter_ns()
 
         w_m = float(self.get_parameter("w_m").value)
-        w_r = float(self.get_parameter("w_r").value)
+        w_d = float(self.get_parameter("w_d").value)
         w_n = float(self.get_parameter("w_n").value)
-        dr_scale = float(self.get_parameter("dr_scale_m").value)
+        scale_d = float(self.get_parameter("scale_d_m").value)
         n_floor = float(self.get_parameter("n_floor").value)
 
         d_m = (1.0 - M.astype(np.float32))
 
-        d_r = np.zeros_like(R, dtype=np.float32)
-        if dr_scale <= 1e-9:
-            dr_scale = 1.0
-        d_r[compare_mask] = np.clip(
-            np.abs(R[compare_mask] - expected_prev[compare_mask]) / dr_scale, 0.0, 1.0
+        d_d = np.zeros_like(R, dtype=np.float32)
+        if scale_d <= 1e-9:
+            scale_d = 1.0
+        d_d[compare_mask] = np.clip(
+            np.abs(R[compare_mask] - expected_prev[compare_mask]) / scale_d, 0.0, 1.0
         ).astype(np.float32)
 
         denom = np.maximum(hits_prev, n_floor).astype(np.float32)
         d_n = np.clip(np.maximum(hits_prev - N, 0.0) / denom, 0.0, 1.0).astype(np.float32)
         d_n[~exp_valid] = 0.0
 
-        Q = (w_m * d_m + w_r * d_r + w_n * d_n).astype(np.float32)
+        Q = (w_m * d_m + w_d * d_d + w_n * d_n).astype(np.float32)
 
         beta = float(self.get_parameter("sigmoid_beta").value)
         c = float(self.get_parameter("sigmoid_center_c").value)
@@ -716,4 +722,3 @@ def main(args=None):
 
 if __name__ == "__main__":
     main()
-
