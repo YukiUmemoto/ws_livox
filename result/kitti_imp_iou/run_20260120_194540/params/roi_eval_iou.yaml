@@ -1,0 +1,12 @@
+roi_eval_iou:
+  ros__parameters:
+    pred_topic: "roi_est/roi_imp_mono8"
+    gt_topic: "pc_perturber/gt_mask_mono8"
+    omega_topic: "roi_est/omega_mono8"
+
+    out_dir: "/home/agx-orin-07/ws_livox/result/kitti_imp_iou/run001"
+    csv_name: "iou_per_frame.csv"
+    warmup_sec: 5.0
+
+    viz_enable: true
+    viz_max_frames: 5

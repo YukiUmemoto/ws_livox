@@ -1,0 +1,9 @@
+run_dir: /home/agx-orin-07/ws_livox/result/kitti_imp_iou/run_20260120_193747
+created: 2026-01-20T19:37:47.678449
+player_yaml: /home/agx-orin-07/ws_livox/result/kitti_imp_iou/run_20260120_193747/params/kitti_player.yaml
+est_yaml: /home/agx-orin-07/ws_livox/result/kitti_imp_iou/run_20260120_193747/params/important_roi_estimator_kitti.yaml
+eval_yaml: /home/agx-orin-07/ws_livox/result/kitti_imp_iou/run_20260120_193747/params/roi_eval_iou.yaml
+
+note:
+  - parameter YAMLs are copied into run_dir/params.
+  - launch_overrides.yaml records dict overrides passed from this launch.

@@ -1,0 +1,12 @@
+important_roi_estimator:
+  ros__parameters:
+    input_topic: "/livox/lidar_perturbed"
+
+    horizontal_fov_deg: 360.0
+    vertical_fov_deg: 60.0
+    num_horizontal_bins: 128
+    num_vertical_bins: 128
+
+    # 評価では出力だけ使うのでCSV等はOFF推奨
+    csv_enable: false
+    publish_masked_maps: true
