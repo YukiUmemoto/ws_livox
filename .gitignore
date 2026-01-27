@@ -13,3 +13,4 @@ __pycache__/
 # VSCode (必要なら)
 .vscode/
 /bags/
+data/
