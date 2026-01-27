@@ -1,0 +1,16 @@
+kitti_player_with_gt:
+  ros__parameters:
+    dump_params_enable: false
+    dump_params_dir: "/home/agx-orin-07/ws_livox/result/kitti_imp_iou/run_20260121_174037"
+
+important_roi_estimator:
+  ros__parameters:
+    dump_params_enable: false
+    dump_params_dir: "/home/agx-orin-07/ws_livox/result/kitti_imp_iou/run_20260121_174037"
+    csv_path: "/home/agx-orin-07/ws_livox/result/kitti_imp_iou/run_20260121_174037/roi_est_proc_time.csv"
+
+roi_eval_iou:
+  ros__parameters:
+    out_dir: "/home/agx-orin-07/ws_livox/result/kitti_imp_iou/run_20260121_174037"
+    dump_params_enable: false
+    dump_params_dir: "/home/agx-orin-07/ws_livox/result/kitti_imp_iou/run_20260121_174037"

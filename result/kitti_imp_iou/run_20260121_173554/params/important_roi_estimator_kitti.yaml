@@ -1,0 +1,63 @@
+important_roi_estimator:
+  ros__parameters:
+    # ===== Topics =====
+    input_topic: "/livox/lidar_perturbed"
+    gt_mask_topic: "pc_perturber/gt_mask_mono8"
+    drop_ratio_topic: "pc_perturber/drop_ratio"
+    bias_topic: "pc_perturber/bias_m"
+
+    # ===== QoS (subscriber/publisher) =====
+    sub_reliability: "best_effort"
+    sub_durability: "volatile"
+    sub_history: "keep_last"
+    sub_depth: 10
+
+    pub_reliability: "best_effort"
+    pub_durability: "volatile"
+    pub_history: "keep_last"
+    pub_depth: 10
+
+    # ===== Binning (KITTIに合わせる) =====
+    horizontal_fov_deg: 360.0
+    vertical_fov_deg: 60.0
+    num_horizontal_bins: 128
+    num_vertical_bins: 128
+
+    # ===== Feature / importance =====
+    enable_temporal: true
+    ema_alpha: 0.05
+    min_expected_hits: 3.0
+    N_min_compare: 1
+
+    w_s: 0.5
+    w_t: 0.5
+    roi_top_percent: 1.0
+
+    # ===== Reliability (bin) =====
+    w_m: 0.4
+    w_d: 0.3
+    w_n: 0.3
+    scale_d_m: 0.5
+    n_floor: 1.0
+    sigmoid_beta: 8.0
+    sigmoid_center_c: 0.6
+    tau_rel: 0.8
+
+    # ===== Outputs =====
+    publish_masked_maps: true
+
+    # ===== Profiling =====
+    profile_enable: true
+    profile_log_period_frames: 30
+    profile_warn_ms: 100.0
+    profile_ema_alpha: 0.1
+
+    # ===== CSV logging =====
+    csv_enable: false
+    csv_path: ""
+    csv_flush_every: 30
+    csv_write_header: true
+
+    # ===== Run folder param dump =====
+    dump_params_enable: true
+    dump_params_dir: ""

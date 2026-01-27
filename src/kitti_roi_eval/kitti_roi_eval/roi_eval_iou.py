@@ -1,31 +1,23 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 # kitti_roi_eval/roi_eval_iou.py
+
 from __future__ import annotations
 
 import os
 import csv
-from typing import Dict, Tuple, Optional, List
+import time
+from typing import Dict, Tuple, Optional, List, Any
 
 import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import Image, PointCloud2
 import matplotlib.pyplot as plt
 
 from matplotlib.colors import ListedColormap, BoundaryNorm
-
-def _to_py(v):
-    # numpy scalar 対策
-    try:
-        import numpy as _np
-        if isinstance(v, _np.generic):
-            return v.item()
-    except Exception:
-        pass
-    if isinstance(v, (list, tuple)):
-        return [_to_py(x) for x in v]
-    return v
 
 
 def make_qos(depth: int = 10) -> QoSProfile:
@@ -37,12 +29,19 @@ def make_qos(depth: int = 10) -> QoSProfile:
     )
 
 
-def stamp_key(msg: Image) -> Tuple[int, int]:
-    return (int(msg.header.stamp.sec), int(msg.header.stamp.nanosec))
+def stamp_key_from_header(h) -> Tuple[int, int]:
+    return (int(h.stamp.sec), int(h.stamp.nanosec))
+
+
+def stamp_key_img(msg: Image) -> Tuple[int, int]:
+    return stamp_key_from_header(msg.header)
+
+
+def stamp_key_pc(msg: PointCloud2) -> Tuple[int, int]:
+    return stamp_key_from_header(msg.header)
 
 
 def img_to_bool(msg: Image, expected_shape: Optional[Tuple[int, int]] = None) -> np.ndarray:
-    # mono8想定（>0 を True）
     if msg.encoding != "mono8":
         raise RuntimeError(f"Expected mono8, got {msg.encoding}")
     a = np.frombuffer(msg.data, dtype=np.uint8).reshape(int(msg.height), int(msg.width))
@@ -51,11 +50,21 @@ def img_to_bool(msg: Image, expected_shape: Optional[Tuple[int, int]] = None) ->
     return (a > 0)
 
 
+def pc2_num_points(msg: PointCloud2) -> int:
+    # KITTI raw は通常 height=1, width=N だが、確実な式は data/point_step
+    ps = int(msg.point_step)
+    if ps <= 0:
+        return int(msg.width) * int(msg.height)
+    n = int(len(msg.data) // ps)
+    return n
+
+
 class RoiIoUEvaluator(Node):
     """
-    pred_topic: 予測マスク（重要候補領域など）  mono8
-    gt_topic:   GTマスク（KITTI tracklet 投影など） mono8
-    omega_topic: Valid(評価対象) マスク（Omega） mono8
+    pred_topic: 予測マスク mono8
+    gt_topic:   GTマスク mono8
+    omega_topic: Valid(Omega) mono8
+    pc_topic:   点群(PointCloud2) 点数取得用
 
     同一stampで pred/gt/omega が揃ったら，omega上で IoU/PRF を算出してCSVへ記録する．
     """
@@ -63,29 +72,24 @@ class RoiIoUEvaluator(Node):
     def __init__(self):
         super().__init__("roi_eval_iou")
 
-        # --- topics ---
         self.declare_parameter("pred_topic", "roi_est/roi_imp_mono8")
         self.declare_parameter("gt_topic", "pc_perturber/gt_mask_mono8")
         self.declare_parameter("omega_topic", "roi_est/omega_mono8")
+        self.declare_parameter("pc_topic", "/livox/lidar_perturbed")
 
-        # --- outputs ---
         self.declare_parameter("out_dir", "")
         self.declare_parameter("csv_name", "iou_per_frame.csv")
         self.declare_parameter("warmup_sec", 5.0)
 
-        # --- viz ---
         self.declare_parameter("viz_enable", True)
         self.declare_parameter("viz_max_frames", 10)
 
-        # --- sync cache ---
         self.declare_parameter("cache_max_entries", 300)
 
-        # ------------------------
-        # read params
-        # ------------------------
         self.pred_topic = str(self.get_parameter("pred_topic").value)
         self.gt_topic = str(self.get_parameter("gt_topic").value)
         self.omega_topic = str(self.get_parameter("omega_topic").value)
+        self.pc_topic = str(self.get_parameter("pc_topic").value)
 
         out_dir = str(self.get_parameter("out_dir").value).strip()
         if out_dir == "":
@@ -104,8 +108,8 @@ class RoiIoUEvaluator(Node):
 
         self.cache_max_entries = int(self.get_parameter("cache_max_entries").value)
 
-        # cache[stamp] = {"pred":mask, "gt":mask, "omega":mask}
-        self.cache: Dict[Tuple[int, int], Dict[str, np.ndarray]] = {}
+        # cache[stamp] = {"pred":bool, "gt":bool, "omega":bool, "n_points":int}
+        self.cache: Dict[Tuple[int, int], Dict[str, Any]] = {}
         self.first_stamp: Optional[Tuple[int, int]] = None
         self.expected_shape: Optional[Tuple[int, int]] = None
 
@@ -116,7 +120,7 @@ class RoiIoUEvaluator(Node):
         self._fp = open(self.csv_path, "w", newline="")
         self._wr = csv.writer(self._fp)
         self._wr.writerow([
-            "frame_idx",
+            "frame_idx_after_warmup",
             "stamp_sec",
             "stamp_nanosec",
             "iou",
@@ -127,6 +131,11 @@ class RoiIoUEvaluator(Node):
             "pred_bins",
             "omega_bins",
             "empty_union0",
+            # --- added ---
+            "proc_time_ms",
+            "gt_cover_ratio",
+            "points_in_frame",
+            "total_bins",
         ])
         self._fp.flush()
 
@@ -134,34 +143,43 @@ class RoiIoUEvaluator(Node):
         self.sub_pred = self.create_subscription(Image, self.pred_topic, self._cb_pred, qos)
         self.sub_gt = self.create_subscription(Image, self.gt_topic, self._cb_gt, qos)
         self.sub_omega = self.create_subscription(Image, self.omega_topic, self._cb_omega, qos)
+        self.sub_pc = self.create_subscription(PointCloud2, self.pc_topic, self._cb_pc, qos)
 
         self.get_logger().info(
             "RoiIoUEvaluator started.\n"
             f"  pred={self.pred_topic}\n"
             f"  gt={self.gt_topic}\n"
             f"  omega(valid)={self.omega_topic}\n"
+            f"  pc_topic={self.pc_topic}\n"
             f"  out_dir={self.out_dir}\n"
             f"  csv={self.csv_path}\n"
             f"  warmup_sec={self.warmup_sec}\n"
             f"  cache_max_entries={self.cache_max_entries}\n"
         )
 
-
-    # ----------------------------
-    # Callbacks
-    # ----------------------------
     def _cb_pred(self, msg: Image):
-        self._store("pred", msg)
+        self._store_img("pred", msg)
 
     def _cb_gt(self, msg: Image):
-        self._store("gt", msg)
+        self._store_img("gt", msg)
 
     def _cb_omega(self, msg: Image):
-        self._store("omega", msg)
+        self._store_img("omega", msg)
 
-    # ----------------------------
-    # Sync store + eval
-    # ----------------------------
+    def _cb_pc(self, msg: PointCloud2):
+        key = stamp_key_pc(msg)
+        if self.first_stamp is None:
+            self.first_stamp = key
+
+        n = pc2_num_points(msg)
+        d = self.cache.get(key)
+        if d is None:
+            d = {}
+            self.cache[key] = d
+        d["n_points"] = int(n)
+
+        self._prune_cache()
+
     def _elapsed(self, key: Tuple[int, int]) -> float:
         if self.first_stamp is None:
             return 0.0
@@ -170,13 +188,12 @@ class RoiIoUEvaluator(Node):
         return (s1 - s0) + (n1 - n0) * 1e-9
 
     def _prune_cache(self):
-        # dict insertion order を利用して古いものから落とす
         while len(self.cache) > max(10, self.cache_max_entries):
             oldest = next(iter(self.cache))
             self.cache.pop(oldest, None)
 
-    def _store(self, kind: str, msg: Image):
-        key = stamp_key(msg)
+    def _store_img(self, kind: str, msg: Image):
+        key = stamp_key_img(msg)
         if self.first_stamp is None:
             self.first_stamp = key
 
@@ -197,19 +214,30 @@ class RoiIoUEvaluator(Node):
 
         self._prune_cache()
 
-        # 揃ったら評価
         if ("pred" in d) and ("gt" in d) and ("omega" in d):
-            self._evaluate_one(key, d["pred"], d["gt"], d["omega"])
+            n_points = int(d.get("n_points", -1))
+            self._evaluate_one(key, d["pred"], d["gt"], d["omega"], n_points)
             self.cache.pop(key, None)
 
-    def _evaluate_one(self, key: Tuple[int, int], pred: np.ndarray, gt: np.ndarray, omega: np.ndarray):
-        # warmup除外
+    def _evaluate_one(
+        self,
+        key: Tuple[int, int],
+        pred: np.ndarray,
+        gt: np.ndarray,
+        omega: np.ndarray,
+        n_points: int,
+    ):
         if self._elapsed(key) < self.warmup_sec:
             return
 
-        valid = omega  # Valid = Omega
-        p = pred & valid
-        g = gt & valid
+        t0 = time.perf_counter()
+
+        valid = omega.astype(bool)
+        pred_b = pred.astype(bool)
+        gt_b = gt.astype(bool)
+
+        p = pred_b & valid
+        g = gt_b & valid
 
         tp = int(np.sum(p & g))
         fp = int(np.sum(p & (~g)))
@@ -233,6 +261,13 @@ class RoiIoUEvaluator(Node):
         gt_bins = int(np.sum(g))
         pred_bins = int(np.sum(p))
         omega_bins = int(np.sum(valid))
+        total_bins = int(pred.size)
+
+        eps = 1e-9
+        gt_cover_ratio = float(tp) / float(gt_bins + eps)
+
+        t1 = time.perf_counter()
+        proc_time_ms = (t1 - t0) * 1e3
 
         row = [
             int(self.frame_count),
@@ -246,6 +281,11 @@ class RoiIoUEvaluator(Node):
             int(pred_bins),
             int(omega_bins),
             int(empty),
+            # --- added ---
+            float(proc_time_ms),
+            float(gt_cover_ratio),
+            int(n_points),
+            int(total_bins),
         ]
         self._wr.writerow(row)
         self._fp.flush()
@@ -254,21 +294,18 @@ class RoiIoUEvaluator(Node):
         self.frame_count += 1
 
         if self.viz_enable and self.frame_count <= self.viz_max:
-            self._save_viz(self.frame_count, pred, gt, omega)
+            self._save_viz(self.frame_count, pred_b, gt_b, valid)
 
         if (self.frame_count % 10) == 0:
             self.get_logger().info(
                 f"[IoU] frame={self.frame_count} iou={iou:.3f} prec={prec:.3f} rec={rec:.3f} "
-                f"(gt={gt_bins}, pred={pred_bins}, omega={omega_bins}, empty={int(empty)})"
+                f"(gt={gt_bins}, pred={pred_bins}, omega={omega_bins}, pts={n_points}, ms={proc_time_ms:.2f})"
             )
 
-    # ----------------------------
-    # Viz
-    # ----------------------------
     def _save_viz(self, idx: int, pred: np.ndarray, gt: np.ndarray, omega: np.ndarray):
         valid = omega.astype(bool)
         pred = pred.astype(bool)
-        gt   = gt.astype(bool)
+        gt = gt.astype(bool)
 
         p = pred & valid
         g = gt & valid
@@ -276,22 +313,19 @@ class RoiIoUEvaluator(Node):
         fp = p & (~g)
         fn = (~p) & g
 
-        # 0:bg, 1:TP, 2:FP, 3:FN
         vis = np.zeros_like(pred, dtype=np.uint8)
         vis[tp] = 1
         vis[fp] = 2
         vis[fn] = 3
 
-        # --- save raw masks (0/255) ---
-        gt_path    = os.path.join(self.viz_dir, f"gt_{idx:06d}.png")
-        pred_path  = os.path.join(self.viz_dir, f"pred_{idx:06d}.png")
+        gt_path = os.path.join(self.viz_dir, f"gt_{idx:06d}.png")
+        pred_path = os.path.join(self.viz_dir, f"pred_{idx:06d}.png")
         omega_path = os.path.join(self.viz_dir, f"omega_{idx:06d}.png")
 
-        plt.imsave(gt_path,   (g.astype(np.uint8) * 255), cmap="gray")
+        plt.imsave(gt_path, (g.astype(np.uint8) * 255), cmap="gray")
         plt.imsave(pred_path, (p.astype(np.uint8) * 255), cmap="gray")
-        plt.imsave(omega_path,(valid.astype(np.uint8) * 255), cmap="gray")
+        plt.imsave(omega_path, (valid.astype(np.uint8) * 255), cmap="gray")
 
-        # --- save TP/FP/FN with fixed colors + colorbar ---
         fig_path = os.path.join(self.viz_dir, f"viz_{idx:06d}.png")
         cmap = ListedColormap(["black", "blue", "lime", "red"])
         norm = BoundaryNorm([-0.5, 0.5, 1.5, 2.5, 3.5], cmap.N)
@@ -305,10 +339,6 @@ class RoiIoUEvaluator(Node):
         plt.savefig(fig_path, dpi=200)
         plt.close()
 
-
-    # ----------------------------
-    # Summary
-    # ----------------------------
     def destroy_node(self):
         try:
             if self._fp is not None:
@@ -329,9 +359,7 @@ class RoiIoUEvaluator(Node):
         return super().destroy_node()
 
     def _write_summary_and_plots(self):
-        arr = np.array(self.rows, dtype=np.float64)  # columns aligned with row
-        # col idx:
-        # 0 frame_idx, 1 sec, 2 nsec, 3 iou, 4 prec, 5 rec, 6 f1, 7 gt, 8 pred, 9 omega, 10 empty
+        arr = np.array(self.rows, dtype=np.float64)
         frame_idx = arr[:, 0]
         iou = arr[:, 3]
         prec = arr[:, 4]
@@ -347,18 +375,10 @@ class RoiIoUEvaluator(Node):
             w = csv.writer(f)
             w.writerow(["metric", "mean", "median", "min", "max", "p95"])
             for name, x in [("iou", iou), ("precision", prec), ("recall", rec), ("f1", f1)]:
-                w.writerow([
-                    name,
-                    float(np.mean(x)),
-                    float(np.median(x)),
-                    float(np.min(x)),
-                    float(np.max(x)),
-                    _p95(x),
-                ])
+                w.writerow([name, float(np.mean(x)), float(np.median(x)), float(np.min(x)), float(np.max(x)), _p95(x)])
             w.writerow([])
             w.writerow(["empty_union0_ratio", float(np.mean(empty))])
 
-        # timeseries
         fig1 = os.path.join(self.out_dir, "iou_prf_timeseries.png")
         plt.figure(figsize=(8, 4))
         plt.plot(frame_idx, iou, label="IoU")
@@ -374,7 +394,6 @@ class RoiIoUEvaluator(Node):
         plt.savefig(fig1, dpi=200)
         plt.close()
 
-        # hist
         fig2 = os.path.join(self.out_dir, "iou_hist.png")
         plt.figure(figsize=(6, 4))
         plt.hist(iou, bins=30)

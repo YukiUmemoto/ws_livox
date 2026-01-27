@@ -1,0 +1,23 @@
+kitti_player_with_gt:
+  ros__parameters:
+    drive_dir: "/home/agx-orin-07/ws_livox/data/kitti_raw/2011_09_26/2011_09_26_drive_0011_sync"
+    tracklet_xml: "/home/agx-orin-07/ws_livox/data/kitti_raw/2011_09_26/2011_09_26_drive_0011_sync/tracklet_labels.xml"
+    calib_velo_to_cam: "/home/agx-orin-07/ws_livox/data/kitti_raw/2011_09_26/calib_velo_to_cam.txt"
+
+    tracklet_coord: "velo"   # まずveloで試す
+    yaw_axis: "z"            # まずzで試す
+    classes: ["Car", "Van", "Truck", "Pedestrian", "Cyclist"]
+
+    rate_hz: 10.0
+    start_idx: 0
+    end_idx: 300
+    stride: 1
+    frame_id: "velo"
+
+    horizontal_fov_deg: 360.0
+    vertical_fov_deg: 60.0
+    num_horizontal_bins: 128
+    num_vertical_bins: 128
+
+    points_topic: "/livox/lidar_perturbed"
+    gt_mask_topic: "pc_perturber/gt_mask_mono8"
