@@ -2,7 +2,7 @@
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
@@ -45,6 +45,14 @@ def generate_launch_description():
     omega_topic = LaunchConfiguration("omega_topic")
 
     csv_name = LaunchConfiguration("csv_name")
+    roi_top_percent = LaunchConfiguration("roi_top_percent")
+
+    # stats (Chap7)
+    stats_enable = LaunchConfiguration("stats_enable")
+    stats_csv_name = LaunchConfiguration("stats_csv_name")
+    stats_flush_every = LaunchConfiguration("stats_flush_every")
+    stats_write_header = LaunchConfiguration("stats_write_header")
+    publish_rel_low = LaunchConfiguration("publish_rel_low")
 
     return LaunchDescription([
         # ---- Required ----
@@ -60,6 +68,14 @@ def generate_launch_description():
         DeclareLaunchArgument("gt_npz", default_value=""),
         DeclareLaunchArgument("cover_tol_bins", default_value="1"),
         DeclareLaunchArgument("csv_name", default_value="cover_per_frame.csv"),
+        DeclareLaunchArgument("roi_top_percent", default_value="10.0"),
+
+        # ---- Stats (Chap7) ----
+        DeclareLaunchArgument("stats_enable", default_value="false"),
+        DeclareLaunchArgument("stats_csv_name", default_value="roi_stats.csv"),
+        DeclareLaunchArgument("stats_flush_every", default_value="30"),
+        DeclareLaunchArgument("stats_write_header", default_value="true"),
+        DeclareLaunchArgument("publish_rel_low", default_value="false"),
 
         # ---- QoS (player) ----
         DeclareLaunchArgument("qos_depth", default_value="50"),
@@ -128,10 +144,23 @@ def generate_launch_description():
                 "H": ParameterValue(H, value_type=int),
                 "num_vertical_bins": ParameterValue(V, value_type=int),
                 "num_horizontal_bins": ParameterValue(H, value_type=int),
+                "roi_top_percent": ParameterValue(roi_top_percent, value_type=float),
 
                 # 重い処理はOFF（完走優先）
                 "csv_enable": False,
                 "viz_enable": False,
+
+                # Chap7 stats CSV
+                "stats_enable": ParameterValue(stats_enable, value_type=bool),
+                "stats_csv_path": ParameterValue(
+                    PathJoinSubstitution([out_dir, stats_csv_name]),
+                    value_type=str,
+                ),
+                "stats_flush_every": ParameterValue(stats_flush_every, value_type=int),
+                "stats_write_header": ParameterValue(stats_write_header, value_type=bool),
+
+                # Reliability-only mask
+                "publish_rel_low": ParameterValue(publish_rel_low, value_type=bool),
             }],
         ),
 

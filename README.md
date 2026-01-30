@@ -60,6 +60,7 @@ Livox/LiDAR 点群から **重要 ROI (Region of Interest)** を推定し、信�
   - `roi_est/roi_imp_mono8`（mono8）
   - `roi_est/roi_use_mono8`（mono8）
   - `roi_est/roi_alert_mono8`（mono8）
+  - `roi_est/rel_low_mono8`（mono8, `publish_rel_low=true` 時）
   - `roi_est/omega_mono8`（mono8、観測/期待の有効領域）
   - `roi_est/frame_rel`, `roi_est/frame_rel_obs`（Float32）
   - `roi_est/alert_ratio`, `roi_est/alert_ratio_omega`（Float32）
@@ -79,6 +80,10 @@ Livox/LiDAR 点群から **重要 ROI (Region of Interest)** を推定し、信�
 **CSV ログ**
 `csv_enable=true` で `roi_est_proc_time.csv` を出力  
 列: `frame_idx, stamp_sec, stamp_nanosec, n_points, proc_time_ms`
+
+**Chap7 用 Stats CSV**
+`stats_enable=true` で `roi_est_stats.csv` を出力（`stats_csv_path` で変更可）  
+列: `frame_idx, omega_bins, roi_bins, keepbin_ratio, roi_points, keeppt_ratio, S_mean_roi, T_mean_roi, I_mean_roi, frame_rel_all, frame_rel_obs, alert_ratio, alert_ratio_omega, drop_ratio, bias_m`
 
 **注意**  
 `src/lidar_roi_nodes/config/roi_est_case*.yaml` は旧パラメータ名が混在しています  
@@ -126,6 +131,9 @@ Livox/LiDAR 点群から **重要 ROI (Region of Interest)** を推定し、信�
 - `roi_cover_logger`  
   オフラインで生成した GT npz を読み込み、finish-first 方式で cover 評価 + ACK。
 
+- `roi_frame_logger`  
+  frame_idx を基準に ROI マップ/マスク/GT を保存する軽量ロガー（Chap7 可視化用）。
+
 - `roi_finish_logger` / `roi_min_logger`  
   最小限のログや遅延計測、done 時に CSV を確実に書き出す。
 
@@ -152,6 +160,10 @@ Livox/LiDAR 点群から **重要 ROI (Region of Interest)** を推定し、信�
 例:
 ```bash
 pip install numpy matplotlib pandas imageio
+```
+環境によっては `pip` が無い場合があるため、その際は:
+```bash
+python3 -m pip install imageio
 ```
 
 ---
@@ -227,6 +239,21 @@ python3 -m kitti_roi_eval.gen_gt_binmask \
   --V 128 --H 128 --hfov_deg 360 --vfov_deg 60
 ```
 
+固定パス例（V/Hごとにフォルダ分けして保存）:
+```bash
+mkdir -p /home/agx-orin-07/ws_livox/data/gt_masks/V128_H128
+python3 -m kitti_roi_eval.gen_gt_binmask \
+  --drive_dir /home/agx-orin-07/ws_livox/data/kitti_raw/2011_09_26/2011_09_26_drive_0011_sync \
+  --out_npz /home/agx-orin-07/ws_livox/data/gt_masks/V128_H128/gt_binmask_V128_H128.npz \
+  --V 128 --H 128 --hfov_deg 360 --vfov_deg 60
+
+mkdir -p /home/agx-orin-07/ws_livox/data/gt_masks/V128_H256
+python3 -m kitti_roi_eval.gen_gt_binmask \
+  --drive_dir /home/agx-orin-07/ws_livox/data/kitti_raw/2011_09_26/2011_09_26_drive_0011_sync \
+  --out_npz /home/agx-orin-07/ws_livox/data/gt_masks/V128_H256/gt_binmask_V128_H256.npz \
+  --V 128 --H 256 --hfov_deg 360 --vfov_deg 60
+```
+
 2) finish-first launch
 ```bash
 ros2 launch kitti_roi_eval kitti_finish_first.launch.py \
@@ -268,6 +295,445 @@ python3 eval/plot_drop_sweep.py
 
 ---
 
+## 7.3 第7章（性能評価）向け 自動評価ツール
+
+第7章で必要な **keepbin/τR スイープ・時系列・重畳可視化・統合評価・処理時間分布** を
+同じ手順で再実行できるよう、`eval/chap7/` にスクリプト群を追加しています。
+
+### 7.3.1 keepbin（τ_I 相当）スイープ → 図7.1〜7.3
+1) スイープ実行:
+```bash
+export DRIVE_DIR=/path/to/kitti_drive
+export GT_NPZ=/path/to/gt_masks.npz
+export OUT=~/ws_livox/eval/chap7/keepbin_sweep
+bash eval/chap7/run_keepbin_sweep.sh
+```
+2) 図生成:
+```bash
+python3 eval/chap7/plot_keepbin_sweep.py --root ~/ws_livox/eval/chap7/keepbin_sweep
+```
+出力:  
+`fig_bbox_cov_vs_keepbin_tauI.png` / `fig_bbox_cov_random_baseline_keepbin.png` / `fig_keeppt_vs_keepbin_tauI.png`
+
+### 7.3.2 代表フレーム抽出 & 重畳可視化 → 図7.6
+1) 代表フレーム抽出:
+```bash
+python3 eval/chap7/select_representative_frames.py \\
+  --cover_csv /path/to/cover_per_frame.csv \\
+  --gt_npz /path/to/gt_masks.npz \\
+  --out_json /path/to/rep_frames_VxH.json
+```
+2) 重要度マップ/ROI/GT の保存（`important_roi_estimator` と KITTI player を動かした状態で `roi_frame_logger` を起動）:
+```bash
+ros2 run kitti_roi_eval roi_frame_logger --ros-args \\
+  -p out_dir:=/path/to/frames_out/VxH \\
+  -p save_importance:=true -p save_roi_masks:=true \\
+  -p save_format:=png -p save_npy:=false \\
+  -p save_gt_mask:=true \\
+  -p gt_npz_path:=/path/to/gt_masks.npz \\
+  -p split_masks_by_type:=true
+```
+3) 重畳レンダリング:
+```bash
+python3 eval/chap7/render_kitti_overlay.py \\
+  --maps_dir /path/to/frames_out/VxH \\
+  --gt_npz /path/to/gt_masks.npz \\
+  --frames_json /path/to/rep_frames_VxH.json \\
+  --out_dir /path/to/figs/VxH
+```
+
+### 7.3.2a GT妥当性チェック（GT形状 + GT内点数）
+GTマスクの形状（連結成分数・bbox範囲）と、GTビン内の点数をCSV出力:
+```bash
+python3 eval/chap7/gt_quality_check.py \
+  --drive_dir /path/to/kitti_drive \
+  --gt_npz /path/to/gt_masks.npz \
+  --out_csv /path/to/gt_quality/VxH/gt_quality.csv \
+  --V 128 --H 128 --hfov_deg 360 --vfov_deg 60
+```
+
+### 7.3.2b 画像上へのGT重畳（視覚チェック）
+KITTI画像に、GTビン集合に該当する点群を投影して重畳:
+```bash
+python3 eval/chap7/render_gt_bins_on_image.py \
+  --drive_dir /path/to/kitti_drive \
+  --gt_npz /path/to/gt_masks.npz \
+  --out_dir /path/to/gt_overlay_images/VxH \
+  --cam 2 \
+  --V 128 --H 128 --hfov_deg 360 --vfov_deg 60
+```
+
+### 7.3.3 τ_R スイープ（欠損形状比較）→ 図7.7
+```bash
+export BAG=/path/to/bag
+export OUT=~/ws_livox/eval/chap7/tauR_sweep
+export DROP_Q=0.10
+bash eval/chap7/run_tauR_sweep.sh
+python3 eval/chap7/plot_tauR_sweep.py --root ~/ws_livox/eval/chap7/tauR_sweep/p_0.10
+```
+出力: `fig_cov_miss_vs_tauR.png`
+
+### 7.3.4 重要度推移（S/T/I 平均）→ 図7.4/7.5
+```bash
+python3 eval/chap7/plot_importance_timeseries.py \\
+  --csvs /path/to/static/roi_stats.csv /path/to/dynamic/roi_stats.csv \\
+  --labels static dynamic \\
+  --out /path/to/fig_imp_static_vs_dynamic.png
+```
+KITTI 系列も同様に `--csvs` を1つ指定して出力します。
+
+### 7.3.5 信頼度推移（p 複数値）→ 図7.8/7.9
+`roi_est_stats.csv` の `frame_rel_all` を時系列で描画:
+```bash
+python3 eval/chap7/plot_reliability_timeseries.py \\
+  --root /path/to/q_sweep_root \\
+  --metric frame_rel_all \\
+  --out /path/to/fig_rel_timeseries.png
+```
+
+### 7.3.6 欠損真値×低信頼の重畳 → 図7.10
+`roi_frame_logger` を使って欠損GTと低信頼マスクを保存:
+```bash
+ros2 run kitti_roi_eval roi_frame_logger --ros-args \\
+  -p out_dir:=/path/to/frames_out \\
+  -p save_gt_mask:=true -p save_rel_low:=true -p save_roi_masks:=true \\
+  -p save_format:=png -p save_npy:=false \\
+  -p split_masks_by_type:=true
+```
+```bash
+python3 eval/chap7/render_missing_overlay.py \\
+  --maps_dir /path/to/frames_out \\
+  --frame_idx 200 \\
+  --use_rel_low \\
+  --out /path/to/fig_miss_vis.png
+```
+
+### 7.3.7 統合評価（重要度/信頼度/統合の比較）→ 図7.12
+まず統合評価の3条件を取得:
+```bash
+export BAG=/path/to/bag
+export OUT=~/ws_livox/eval/chap7/integration_eval
+bash eval/chap7/run_integration_eval.sh
+```
+統合出力の看板図（図7.11）:
+```bash
+ros2 run kitti_roi_eval roi_frame_logger --ros-args \\
+  -p out_dir:=/path/to/frames_out \\
+  -p save_roi_masks:=true -p save_rel_low:=true \\
+  -p save_format:=png -p save_npy:=false \\
+  -p split_masks_by_type:=true
+```
+```bash
+python3 eval/chap7/render_integration_overlay.py \\
+  --maps_dir /path/to/frames_out \\
+  --frame_idx 200 \\
+  --out /path/to/fig_integration_vis_kitti_rep.png
+```
+`roi_eval_iou` を3条件で回して `iou_per_frame.csv` を得た後:
+```bash
+python3 eval/chap7/plot_integration_metrics.py \\
+  --imp_csv /path/to/imp/iou_per_frame.csv \\
+  --rel_csv /path/to/rel/iou_per_frame.csv \\
+  --int_csv /path/to/int/iou_per_frame.csv \\
+  --out /path/to/fig_cov_integrated.png
+```
+
+### 7.3.8 処理時間分布・追従率 → 図7.13/7.14
+```bash
+python3 eval/chap7/plot_proc_time.py \\
+  --csv /path/to/roi_est_proc_time.csv \\
+  --period_ms 100 \\
+  --out /path/to/fig_proc_time.png
+```
+
+### 7.3.9 Chap7 一括実行テンプレート
+```bash
+bash eval/chap7/run_chap7_all.sh
+```
+
+---
+
+## 7.4 この環境での実行プロンプト（固定パス版）
+
+このリポジトリ内に実在するパスへ固定した **コピペ用プロンプト** です。  
+（KITTI と bag は `/home/agx-orin-07/ws_livox/` 配下に存在する前提）
+
+### 共通（端末ごとに一度）
+```bash
+source /opt/ros/humble/setup.bash
+source /home/agx-orin-07/ws_livox/install/setup.bash
+```
+
+### 図7.1〜7.3：keepbin スイープ（KITTI）
+```bash
+export DRIVE_DIR=/home/agx-orin-07/ws_livox/data/kitti_raw/2011_09_26/2011_09_26_drive_0011_sync
+export GT_NPZ=/home/agx-orin-07/ws_livox/data/gt_masks/V128_H128/gt_binmask_V128_H128.npz
+export OUT=/home/agx-orin-07/ws_livox/eval/chap7/keepbin_sweep/V128_H128
+bash /home/agx-orin-07/ws_livox/eval/chap7/run_keepbin_sweep.sh
+python3 /home/agx-orin-07/ws_livox/eval/chap7/plot_keepbin_sweep.py --root /home/agx-orin-07/ws_livox/eval/chap7/keepbin_sweep/V128_H128
+```
+
+### 図7.4/7.5：重要度推移（S/T/I）
+静的/動的 bag から stats CSV を生成して描画:
+```bash
+export BAG=/home/agx-orin-07/ws_livox/bags/20251222_orin_avia_in_static_01
+export OUT=/home/agx-orin-07/ws_livox/eval/chap7/imp_static
+export QS="0.00"
+bash /home/agx-orin-07/ws_livox/eval/chap7/run_q_sweep_stats.sh
+
+export BAG=/home/agx-orin-07/ws_livox/bags/20251222_orin_avia_in_dynamic_01
+export OUT=/home/agx-orin-07/ws_livox/eval/chap7/imp_dynamic
+export QS="0.00"
+bash /home/agx-orin-07/ws_livox/eval/chap7/run_q_sweep_stats.sh
+
+python3 /home/agx-orin-07/ws_livox/eval/chap7/plot_importance_timeseries.py \
+  --csvs \
+    /home/agx-orin-07/ws_livox/eval/chap7/imp_static/q_0.00/roi_stats.csv \
+    /home/agx-orin-07/ws_livox/eval/chap7/imp_dynamic/q_0.00/roi_stats.csv \
+  --labels static dynamic \
+  --out /home/agx-orin-07/ws_livox/eval/chap7/fig_imp_static_vs_dynamic.png
+```
+
+run_q_sweep_stats.sh が動かない環境向け（bash の代わりに直接コマンド）:
+
+Terminal A（perturber）:
+```bash
+source /opt/ros/humble/setup.bash
+source /home/agx-orin-07/ws_livox/install/setup.bash
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+export FASTRTPS_DEFAULT_PROFILES_FILE=/home/agx-orin-07/ws_livox/eval/chap7/fastrtps_no_shm.xml
+
+ros2 run lidar_roi_nodes pointcloud_perturber --ros-args \
+  -p input_topic:=/livox/lidar \
+  -p output_topic:=/livox/lidar_perturbed \
+  -p sub_reliability:=reliable -p sub_durability:=volatile \
+  -p pub_reliability:=best_effort \
+  -p enable_drop:=true -p drop_prob_q:=0.00
+```
+
+Terminal B（important_roi_estimator）:
+```bash
+source /opt/ros/humble/setup.bash
+source /home/agx-orin-07/ws_livox/install/setup.bash
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+export FASTRTPS_DEFAULT_PROFILES_FILE=/home/agx-orin-07/ws_livox/eval/chap7/fastrtps_no_shm.xml
+
+mkdir -p /home/agx-orin-07/ws_livox/eval/chap7/imp_static/q_0.00
+ros2 run lidar_roi_nodes important_roi_estimator --ros-args \
+  -p input_topic:=/livox/lidar_perturbed \
+  -p roi_top_percent:=10.0 \
+  -p stats_enable:=true \
+  -p stats_csv_path:=/home/agx-orin-07/ws_livox/eval/chap7/imp_static/q_0.00/roi_stats.csv \
+  -p stats_flush_every:=1
+```
+
+Terminal C（bag play）:
+```bash
+source /opt/ros/humble/setup.bash
+source /home/agx-orin-07/ws_livox/install/setup.bash
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+export FASTRTPS_DEFAULT_PROFILES_FILE=/home/agx-orin-07/ws_livox/eval/chap7/fastrtps_no_shm.xml
+
+ros2 bag play /home/agx-orin-07/ws_livox/bags/20251222_orin_avia_in_static_01 \
+  --rate 1.0 --disable-keyboard-controls
+```
+
+
+KITTI 対応版（方法A: finish-first + ACK を使って stats CSV を生成）:
+```bash
+# p（drop率）ごとに出力フォルダを分ける，適切に変更
+export P=0.10
+
+# Terminal A: important_roi_estimator
+export P=0.10
+ros2 run lidar_roi_nodes important_roi_estimator --ros-args \
+  -p input_topic:=/livox/lidar_perturbed \
+  -p roi_top_percent:=10.0 \
+  -p stats_enable:=true \
+  -p stats_csv_path:=/home/agx-orin-07/ws_livox/eval/chap7/imp_kitti/p_${P}/roi_stats.csv \
+  -p stats_flush_every:=1
+
+# Terminal B: ACK logger（ACK を返さないと finish-first が止まる）
+export P=0.10
+ros2 run kitti_roi_eval roi_finish_logger --ros-args \
+  -p out_dir:=/home/agx-orin-07/ws_livox/eval/chap7/imp_kitti/p_${P} \
+  -p csv_name:=min_log.csv \
+  -p pred_topic:=roi_est/roi_imp_mono8 \
+  -p omega_topic:=roi_est/omega_mono8 \
+  -p pc_topic:=/livox/lidar_perturbed
+
+# Terminal C: KITTI player（finish-first）
+export P=0.10
+ros2 run kitti_roi_eval kitti_player_finish_first --ros-args \
+  -p drive_dir:=/home/agx-orin-07/ws_livox/data/kitti_raw/2011_09_26/2011_09_26_drive_0011_sync \
+  -p points_topic:=/livox/lidar_perturbed
+
+python3 /home/agx-orin-07/ws_livox/eval/chap7/plot_importance_timeseries.py \
+  --csvs /home/agx-orin-07/ws_livox/eval/chap7/imp_kitti/p_${P}/roi_stats.csv \
+  --labels kitti \
+  --out /home/agx-orin-07/ws_livox/eval/chap7/fig_kitti_imp_timeseries.png
+```
+
+補足: RTPS_TRANSPORT_SHM エラーが出る環境では、**ターミナルを3つ**に分けて
+`pointcloud_perturber` / `important_roi_estimator` / `ros2 bag play` を独立起動すると
+安定して CSV が生成できることを確認済みです。
+
+補足: `roi_stats.csv` に `roi_top_percent` を出力するように追加済みです。
+
+### 図7.6：代表フレーム重畳（KITTI）
+```bash
+# 0) 代表フレーム抽出（Cov_bbox 分布から典型/上位5%/下位5%を選択）
+python3 /home/agx-orin-07/ws_livox/eval/chap7/select_representative_frames.py \
+  --cover_csv /home/agx-orin-07/ws_livox/eval/chap7/keepbin_sweep/V128_H128/p_10/cover_per_frame.csv \
+  --gt_npz /home/agx-orin-07/ws_livox/data/gt_masks/V128_H128/gt_binmask_V128_H128.npz \
+  --out_json /home/agx-orin-07/ws_livox/eval/chap7/rep_frames_V128_H128.json
+
+# 1) KITTI player + important_roi_estimator を起動して map を流す
+#   - roi_frame_logger は「入力が来たときだけ」保存するので、必ず同時に起動する
+#   - finish-first ではなく通常の player を使う（ACK 不要）
+# Terminal A: important_roi_estimator
+ros2 run lidar_roi_nodes important_roi_estimator --ros-args \
+  -p input_topic:=/livox/lidar_perturbed \
+  -p roi_top_percent:=10.0 \
+  -p publish_rel_low:=true \
+  -p stats_enable:=false
+
+# Terminal B: roi_frame_logger を別ターミナルで起動（保存先は固定）
+ros2 run kitti_roi_eval roi_frame_logger --ros-args \
+  -p out_dir:=/home/agx-orin-07/ws_livox/eval/chap7/kitti_frames/V128_H128 \
+  -p save_importance:=true -p save_roi_masks:=true \
+  -p save_format:=png -p save_npy:=false \
+  -p save_gt_mask:=true \
+  -p gt_npz_path:=/home/agx-orin-07/ws_livox/data/gt_masks/V128_H128/gt_binmask_V128_H128.npz \
+  -p split_masks_by_type:=true
+
+# Terminal C: KITTI player（全フレーム配信）
+ros2 run kitti_roi_eval kitti_player_with_gt --ros-args \
+  -p drive_dir:=/home/agx-orin-07/ws_livox/data/kitti_raw/2011_09_26/2011_09_26_drive_0011_sync \
+  -p points_topic:=/livox/lidar_perturbed
+
+# 3) 保存された map/mask から重畳図を作成
+python3 /home/agx-orin-07/ws_livox/eval/chap7/render_kitti_overlay.py \
+  --maps_dir /home/agx-orin-07/ws_livox/eval/chap7/kitti_frames/V128_H128 \
+  --gt_npz /home/agx-orin-07/ws_livox/data/gt_masks/V128_H128/gt_binmask_V128_H128.npz \
+  --frames_json /home/agx-orin-07/ws_livox/eval/chap7/rep_frames_V128_H128.json \
+  --out_dir /home/agx-orin-07/ws_livox/eval/chap7/figs_kitti_rep/V128_H128
+```
+
+### 図7.6補足：GT妥当性チェック（GT形状 + GT内点数）
+```bash
+python3 /home/agx-orin-07/ws_livox/eval/chap7/gt_quality_check.py \
+  --drive_dir /home/agx-orin-07/ws_livox/data/kitti_raw/2011_09_26/2011_09_26_drive_0011_sync \
+  --gt_npz /home/agx-orin-07/ws_livox/data/gt_masks/V128_H128/gt_binmask_V128_H128.npz \
+  --out_csv /home/agx-orin-07/ws_livox/eval/chap7/gt_quality/V128_H128/gt_quality.csv \
+  --V 128 --H 128 --hfov_deg 360 --vfov_deg 60
+```
+
+### 図7.6補足：画像上へのGT重畳（視覚チェック）
+```bash
+python3 /home/agx-orin-07/ws_livox/eval/chap7/render_gt_bins_on_image.py \
+  --drive_dir /home/agx-orin-07/ws_livox/data/kitti_raw/2011_09_26/2011_09_26_drive_0011_sync \
+  --gt_npz /home/agx-orin-07/ws_livox/data/gt_masks/V128_H128/gt_binmask_V128_H128.npz \
+  --out_dir /home/agx-orin-07/ws_livox/eval/chap7/gt_overlay_images/V128_H128 \
+  --cam 2 \
+  --V 128 --H 128 --hfov_deg 360 --vfov_deg 60
+```
+
+
+### 図7.7：τ_R スイープ（欠損形状比較）
+```bash
+export BAG=/home/agx-orin-07/ws_livox/bags/20251222_orin_avia_in_dynamic_01
+export OUT=/home/agx-orin-07/ws_livox/eval/chap7/tauR_sweep
+export DROP_Q=0.10
+bash /home/agx-orin-07/ws_livox/eval/chap7/run_tauR_sweep.sh
+python3 /home/agx-orin-07/ws_livox/eval/chap7/plot_tauR_sweep.py \
+  --root /home/agx-orin-07/ws_livox/eval/chap7/tauR_sweep/p_0.10
+```
+
+### 図7.8/7.9：信頼度推移（p 複数値）
+```bash
+export BAG=/home/agx-orin-07/ws_livox/bags/20251222_orin_avia_in_dynamic_01
+export OUT=/home/agx-orin-07/ws_livox/eval/chap7/q_sweep_stats
+bash /home/agx-orin-07/ws_livox/eval/chap7/run_q_sweep_stats.sh
+
+python3 /home/agx-orin-07/ws_livox/eval/chap7/plot_reliability_timeseries.py \
+  --root /home/agx-orin-07/ws_livox/eval/chap7/q_sweep_stats \
+  --metric frame_rel_all \
+  --out /home/agx-orin-07/ws_livox/eval/chap7/fig_rel_timeseries.png
+```
+
+### 図7.10：欠損真値×低信頼 重畳
+```bash
+ros2 run kitti_roi_eval roi_frame_logger --ros-args \
+  -p out_dir:=/home/agx-orin-07/ws_livox/eval/chap7/miss_frames \
+  -p save_gt_mask:=true -p save_rel_low:=true -p save_roi_masks:=true \
+  -p save_format:=png -p save_npy:=false \
+  -p split_masks_by_type:=true
+
+python3 /home/agx-orin-07/ws_livox/eval/chap7/render_missing_overlay.py \
+  --maps_dir /home/agx-orin-07/ws_livox/eval/chap7/miss_frames \
+  --frame_idx 200 \
+  --use_rel_low \
+  --out /home/agx-orin-07/ws_livox/eval/chap7/fig_miss_vis.png
+```
+
+
+### 図7.11〜7.12：統合出力（看板図 + 統合比較）
+```bash
+export BAG=/home/agx-orin-07/ws_livox/bags/20251222_orin_avia_in_dynamic_01
+export OUT=/home/agx-orin-07/ws_livox/eval/chap7/integration_eval
+export DROP_Q=0.10
+bash /home/agx-orin-07/ws_livox/eval/chap7/run_integration_eval.sh
+
+ros2 run kitti_roi_eval roi_frame_logger --ros-args \
+  -p out_dir:=/home/agx-orin-07/ws_livox/eval/chap7/integration_frames \
+  -p save_roi_masks:=true -p save_rel_low:=true \
+  -p save_format:=png -p save_npy:=false \
+  -p split_masks_by_type:=true
+
+python3 /home/agx-orin-07/ws_livox/eval/chap7/render_integration_overlay.py \
+  --maps_dir /home/agx-orin-07/ws_livox/eval/chap7/integration_frames \
+  --frame_idx 200 \
+  --out /home/agx-orin-07/ws_livox/eval/chap7/fig_integration_vis_kitti_rep.png
+
+python3 /home/agx-orin-07/ws_livox/eval/chap7/plot_integration_metrics.py \
+  --imp_csv /home/agx-orin-07/ws_livox/eval/chap7/integration_eval/p_0.10/imp/iou_per_frame.csv \
+  --rel_csv /home/agx-orin-07/ws_livox/eval/chap7/integration_eval/p_0.10/rel/iou_per_frame.csv \
+  --int_csv /home/agx-orin-07/ws_livox/eval/chap7/integration_eval/p_0.10/integrated/iou_per_frame.csv \
+  --out /home/agx-orin-07/ws_livox/eval/chap7/fig_cov_integrated.png
+```
+
+
+### 図7.13〜7.14：処理時間分布 + 追従率
+```bash
+export BAG=/home/agx-orin-07/ws_livox/bags/20251222_orin_avia_in_dynamic_01
+export OUT=/home/agx-orin-07/ws_livox/eval/chap7/proc_time
+mkdir -p $OUT
+
+ros2 run lidar_roi_nodes pointcloud_perturber --ros-args \
+  -p input_topic:=/livox/lidar \
+  -p output_topic:=/livox/lidar_perturbed \
+  -p enable_drop:=false \
+  > $OUT/perturber.log 2>&1 &
+
+ros2 run lidar_roi_nodes important_roi_estimator --ros-args \
+  -p input_topic:=/livox/lidar_perturbed \
+  -p csv_enable:=true \
+  -p csv_path:=$OUT/roi_est_proc_time.csv \
+  -p csv_flush_every:=1 \
+  > $OUT/estimator.log 2>&1 &
+
+sleep 1
+ros2 bag play $BAG --rate 1.0 --disable-keyboard-controls > $OUT/bagplay.log 2>&1
+
+python3 /home/agx-orin-07/ws_livox/eval/chap7/plot_proc_time.py \
+  --csv /home/agx-orin-07/ws_livox/eval/chap7/proc_time/roi_est_proc_time.csv \
+  --period_ms 100 \
+  --out /home/agx-orin-07/ws_livox/eval/chap7/fig_proc_time.png
+```
+
+---
+
 ## 8. 主要トピックまとめ
 
 ### 重要 ROI 推定
@@ -276,6 +742,7 @@ python3 eval/plot_drop_sweep.py
   - `roi_est/importance_map` (Float32MultiArray)
   - `roi_est/rel_map` (Float32MultiArray)
   - `roi_est/roi_imp_mono8` / `roi_est/roi_use_mono8` / `roi_est/roi_alert_mono8`
+  - `roi_est/rel_low_mono8` (mono8, `publish_rel_low=true`)
   - `roi_est/omega_mono8`
   - `roi_est/frame_rel`, `roi_est/frame_rel_obs`
   - `roi_est/alert_ratio`, `roi_est/alert_ratio_omega`

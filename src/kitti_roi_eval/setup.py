@@ -34,6 +34,7 @@ setup(
             'kitti_player_finish_first = kitti_roi_eval.kitti_player_finish_first:main',
             'roi_finish_logger = kitti_roi_eval.roi_finish_logger:main',
             'roi_cover_logger = kitti_roi_eval.roi_cover_logger:main',
+            'roi_frame_logger = kitti_roi_eval.roi_frame_logger:main',
         ],
     },
 )

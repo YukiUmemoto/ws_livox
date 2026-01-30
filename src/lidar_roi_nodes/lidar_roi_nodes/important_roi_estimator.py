@@ -181,6 +181,15 @@ class ImportantROIWithReliability(Node):
         self.declare_parameter("csv_flush_every", 30)
         self.declare_parameter("csv_write_header", True)
 
+        # ===== CSV logging (stats for Chap7) =====
+        self.declare_parameter("stats_enable", False)
+        self.declare_parameter("stats_csv_path", "")
+        self.declare_parameter("stats_flush_every", 30)
+        self.declare_parameter("stats_write_header", True)
+
+        # ===== Optional outputs =====
+        self.declare_parameter("publish_rel_low", False)
+
         # --------------------
         # Init params
         # --------------------
@@ -237,6 +246,7 @@ class ImportantROIWithReliability(Node):
         self.pub_roi_use = self.create_publisher(Image, "roi_est/roi_use_mono8", pub_qos)
         self.pub_roi_alert = self.create_publisher(Image, "roi_est/roi_alert_mono8", pub_qos)
         self.pub_omega = self.create_publisher(Image, "roi_est/omega_mono8", pub_qos)
+        self.pub_rel_low = self.create_publisher(Image, "roi_est/rel_low_mono8", pub_qos)
 
         self.pub_frame_rel_all = self.create_publisher(Float32, "roi_est/frame_rel", pub_qos)
         self.pub_frame_rel_obs = self.create_publisher(Float32, "roi_est/frame_rel_obs", pub_qos)
@@ -261,11 +271,21 @@ class ImportantROIWithReliability(Node):
         if self._csv_enabled:
             self._init_csv_writer()
 
+        # Stats CSV (Chap7)
+        self._stats_enabled = bool(self.get_parameter("stats_enable").value)
+        self._stats_fp = None
+        self._stats_writer = None
+        self._stats_flush_every = int(self.get_parameter("stats_flush_every").value)
+        self._stats_rows_since_flush = 0
+        if self._stats_enabled:
+            self._init_stats_writer()
+
         self.get_logger().info(
             "ImportantROIWithReliability (focused+CSV) started.\n"
             f"  input={self.input_topic}\n"
             f"  bins=VxH={self.V}x{self.H}\n"
             f"  csv_enable={self._csv_enabled}\n"
+            f"  stats_enable={self._stats_enabled}\n"
             "  publish: omega, roi_imp/use/alert, importance_map, rel_map, frame_rel(all/obs), alert_ratio(_omega)\n"
         )
 
@@ -340,6 +360,123 @@ class ImportantROIWithReliability(Node):
                 self._csv_rows_since_flush = 0
         except Exception as e:
             self.get_logger().error(f"[CSV] write failed: {e}")
+
+    # --------------------
+    # Stats CSV helpers (Chap7)
+    # --------------------
+    def _stats_header(self):
+        return [
+            "frame_idx",
+            "stamp_sec",
+            "stamp_nanosec",
+            "n_points",
+            "omega_bins",
+            "roi_bins",
+            "keepbin_ratio",
+            "roi_top_percent",
+            "roi_points",
+            "keeppt_ratio",
+            "S_mean_roi",
+            "T_mean_roi",
+            "I_mean_roi",
+            "frame_rel_all",
+            "frame_rel_obs",
+            "alert_ratio",
+            "alert_ratio_omega",
+            "drop_ratio",
+            "bias_m",
+        ]
+
+    def _init_stats_writer(self):
+        path = str(self.get_parameter("stats_csv_path").value).strip()
+        if path == "":
+            path = os.path.abspath("roi_est_stats.csv")
+        path = os.path.expanduser(path)
+
+        d = os.path.dirname(path)
+        if d != "":
+            os.makedirs(d, exist_ok=True)
+
+        try:
+            self._stats_fp = open(path, "a", newline="")
+            self._stats_writer = csv.writer(self._stats_fp)
+
+            if bool(self.get_parameter("stats_write_header").value):
+                try:
+                    if os.path.getsize(path) == 0:
+                        self._stats_writer.writerow(self._stats_header())
+                        self._stats_fp.flush()
+                except Exception:
+                    pass
+
+            self.get_logger().info(f"[STATS] logging enabled: {path}")
+        except Exception as e:
+            self.get_logger().error(f"[STATS] failed to open '{path}': {e}")
+            self._stats_enabled = False
+            self._stats_fp = None
+            self._stats_writer = None
+
+    def _stats_write_row(
+        self,
+        header,
+        n_points: int,
+        omega_bins: int,
+        roi_bins: int,
+        keepbin_ratio: float,
+        roi_points: int,
+        keeppt_ratio: float,
+        s_mean_roi: float,
+        t_mean_roi: float,
+        i_mean_roi: float,
+        frame_rel_all: float,
+        frame_rel_obs: float,
+        alert_ratio: float,
+        alert_ratio_omega: float,
+        drop_ratio: float,
+        bias_m: float,
+    ):
+        if (not self._stats_enabled) or (self._stats_writer is None):
+            return
+
+        try:
+            sec = int(header.stamp.sec)
+            nsec = int(header.stamp.nanosec)
+        except Exception:
+            sec, nsec = 0, 0
+
+        row = [
+            int(self._frame_counter),
+            sec,
+            nsec,
+            int(n_points),
+            int(omega_bins),
+            int(roi_bins),
+            float(keepbin_ratio),
+            float(self.get_parameter("roi_top_percent").value),
+            int(roi_points),
+            float(keeppt_ratio),
+            float(s_mean_roi),
+            float(t_mean_roi),
+            float(i_mean_roi),
+            float(frame_rel_all),
+            float(frame_rel_obs),
+            float(alert_ratio),
+            float(alert_ratio_omega),
+            float(drop_ratio),
+            float(bias_m),
+        ]
+
+        try:
+            self._stats_writer.writerow(row)
+            self._stats_rows_since_flush += 1
+            if self._stats_rows_since_flush >= max(1, self._stats_flush_every):
+                try:
+                    self._stats_fp.flush()
+                except Exception:
+                    pass
+                self._stats_rows_since_flush = 0
+        except Exception as e:
+            self.get_logger().error(f"[STATS] write failed: {e}")
 
     # --------------------
     # GT callbacks (compat)
@@ -639,8 +776,30 @@ class ImportantROIWithReliability(Node):
         frame_rel_all = float(np.mean(Rel[Omega], dtype=np.float64)) if np.any(Omega) else float("nan")
         frame_rel_obs = float(np.mean(Rel[M], dtype=np.float64)) if np.any(M) else float("nan")
 
+        # ---- stats (Chap7) ----
+        omega_bins = int(np.sum(Omega))
+        roi_bins = int(np.sum(roi_imp))
+        keepbin_ratio = float(roi_bins / max(1, omega_bins))
+        n_points = int(pts.shape[0])
+        roi_points = int(np.sum(N[roi_imp])) if roi_bins > 0 else 0
+        keeppt_ratio = float(roi_points / max(1, n_points))
+
+        if roi_bins > 0:
+            s_mean_roi = float(np.mean(S_n[roi_imp], dtype=np.float64))
+            t_mean_roi = float(np.mean(T_n[roi_imp], dtype=np.float64))
+            i_mean_roi = float(np.mean(I[roi_imp], dtype=np.float64))
+        else:
+            s_mean_roi = float("nan")
+            t_mean_roi = float("nan")
+            i_mean_roi = float("nan")
+
         # ---- publish minimum outputs ----
         t0 = time.perf_counter_ns()
+
+        publish_rel_low = bool(self.get_parameter("publish_rel_low").value)
+        if publish_rel_low:
+            rel_low = Omega & (Rel < tau_rel)
+            self._publish_mask_image(self.pub_rel_low, msg.header, rel_low)
 
         self._publish_mask_image(self.pub_omega, msg.header, Omega)
         self._publish_mask_image(self.pub_roi_imp, msg.header, roi_imp)
@@ -661,6 +820,25 @@ class ImportantROIWithReliability(Node):
         m = Float32(); m.data = frame_rel_obs; self.pub_frame_rel_obs.publish(m)
         m = Float32(); m.data = alert_ratio; self.pub_alert_ratio.publish(m)
         m = Float32(); m.data = alert_ratio_omega; self.pub_alert_ratio_omega.publish(m)
+
+        self._stats_write_row(
+            msg.header,
+            n_points=n_points,
+            omega_bins=omega_bins,
+            roi_bins=roi_bins,
+            keepbin_ratio=keepbin_ratio,
+            roi_points=roi_points,
+            keeppt_ratio=keeppt_ratio,
+            s_mean_roi=s_mean_roi,
+            t_mean_roi=t_mean_roi,
+            i_mean_roi=i_mean_roi,
+            frame_rel_all=frame_rel_all,
+            frame_rel_obs=frame_rel_obs,
+            alert_ratio=alert_ratio,
+            alert_ratio_omega=alert_ratio_omega,
+            drop_ratio=self._last_drop_ratio,
+            bias_m=self._last_bias_m,
+        )
 
         t1 = time.perf_counter_ns()
         self.prof.mark("core:publish_min", t0, t1)
@@ -693,6 +871,18 @@ class ImportantROIWithReliability(Node):
                     pass
                 try:
                     self._csv_fp.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            if self._stats_fp is not None:
+                try:
+                    self._stats_fp.flush()
+                except Exception:
+                    pass
+                try:
+                    self._stats_fp.close()
                 except Exception:
                     pass
         except Exception:
