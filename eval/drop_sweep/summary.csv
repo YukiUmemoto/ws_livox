@@ -1,3 +1,0 @@
-q,frame_rel_mean,frame_rel_std,alert_ratio_mean,alert_ratio_std,n_frames,drop_ratio_mean,csv_path
-0.0,0.9804825863667896,0.0020325677875752627,0.2182420878150905,0.034887036314607996,280,0.0,/home/agx-orin-07/ws_livox/eval/drop_sweep/snapshot_q_0.00/frames.csv
-0.25,0.982068804447337,0.002566682441115699,0.20804869952276292,0.03772459456142261,281,0.2515865949867459,/home/agx-orin-07/ws_livox/eval/drop_sweep/snapshot_q_0.25/frames.csv
