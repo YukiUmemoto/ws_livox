@@ -151,7 +151,15 @@ def point_in_box_batch(points_xyz: np.ndarray, box: Box3D) -> np.ndarray:
     return inside
 
 
-def angle_bins(xyz: np.ndarray, H: int, V: int, hfov_deg: float, vfov_deg: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+def angle_bins(
+    xyz: np.ndarray,
+    H: int,
+    V: int,
+    hfov_deg: float,
+    vfov_deg: float,
+    vfov_up_deg: float | None = None,
+    vfov_down_deg: float | None = None,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     xyz: (N,3)
     returns:
@@ -178,9 +186,14 @@ def angle_bins(xyz: np.ndarray, H: int, V: int, hfov_deg: float, vfov_deg: float
     h = np.floor((az_deg / hfov_deg) * H).astype(np.int64)
     valid &= (h >= 0) & (h < H)
 
-    # vertical [-vfov/2, +vfov/2]
-    vmin = -vfov_deg * 0.5
-    vmax = +vfov_deg * 0.5
+    # vertical
+    if vfov_up_deg is not None and vfov_down_deg is not None and (vfov_up_deg + vfov_down_deg) > 0:
+        vmin = -float(vfov_down_deg)
+        vmax = +float(vfov_up_deg)
+        vfov_deg = float(vfov_up_deg) + float(vfov_down_deg)
+    else:
+        vmin = -vfov_deg * 0.5
+        vmax = +vfov_deg * 0.5
     v = np.floor(((el_deg - vmin) / vfov_deg) * V).astype(np.int64)
     valid &= (el_deg >= vmin) & (el_deg <= vmax) & (v >= 0) & (v < V)
 
@@ -199,7 +212,9 @@ def main():
 
     ap.add_argument("--V", type=int, default=128)
     ap.add_argument("--H", type=int, default=128)
-    ap.add_argument("--vfov", type=float, default=60.0)
+    ap.add_argument("--vfov", type=float, default=26.8)
+    ap.add_argument("--vfov_up", type=float, default=2.0)
+    ap.add_argument("--vfov_down", type=float, default=24.8)
     ap.add_argument("--hfov", type=float, default=360.0)
 
     ap.add_argument("--gt_value", type=int, default=255)
@@ -252,7 +267,15 @@ def main():
 
         gt = np.zeros((V, H), dtype=np.uint8)
         if len(boxes) > 0 and xyz.shape[0] > 0:
-            valid, v_idx, h_idx = angle_bins(xyz, H=H, V=V, hfov_deg=args.hfov, vfov_deg=args.vfov)
+            valid, v_idx, h_idx = angle_bins(
+                xyz,
+                H=H,
+                V=V,
+                hfov_deg=args.hfov,
+                vfov_deg=args.vfov,
+                vfov_up_deg=args.vfov_up,
+                vfov_down_deg=args.vfov_down,
+            )
             xyz_valid = xyz[valid]
             v_valid = v_idx[valid]
             h_valid = h_idx[valid]

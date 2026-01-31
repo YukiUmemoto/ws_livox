@@ -773,7 +773,16 @@ class ImportantROIWithReliability(Node):
         eps = 1e-6
         alert_ratio = float(roi_alert.sum() / (roi_imp.sum() + eps))
         alert_ratio_omega = float(np.mean((Rel[Omega] < tau_rel), dtype=np.float64)) if np.any(Omega) else float("nan")
-        frame_rel_all = float(np.mean(Rel[Omega], dtype=np.float64)) if np.any(Omega) else float("nan")
+        # Restore legacy behavior: prefer bins with enough hits (Bn) within Omega
+        frame_mask = (Bn & Omega)
+        if np.any(frame_mask):
+            frame_rel_all = float(np.mean(Rel[frame_mask], dtype=np.float64))
+        elif np.any(Omega):
+            frame_rel_all = float(np.mean(Rel[Omega], dtype=np.float64))
+        elif np.any(M):
+            frame_rel_all = float(np.mean(Rel[M], dtype=np.float64))
+        else:
+            frame_rel_all = 1.0
         frame_rel_obs = float(np.mean(Rel[M], dtype=np.float64)) if np.any(M) else float("nan")
 
         # ---- stats (Chap7) ----

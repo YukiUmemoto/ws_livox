@@ -89,6 +89,16 @@ class RoiFrameLogger(Node):
         self.declare_parameter("save_range", False)  # ignored (compat)
         self.declare_parameter("gt_npz_path", "")
         self.declare_parameter("split_masks_by_type", True)
+        # visualization alignment
+        self.declare_parameter("save_vis_aligned", True)
+        self.declare_parameter("vis_dir", "vis")
+        self.declare_parameter("vis_flip_ud", True)
+        self.declare_parameter("vis_flip_lr", True)
+        self.declare_parameter("vis_stretch", True)
+        self.declare_parameter("vis_hfov_deg", 360.0)
+        self.declare_parameter("vis_vfov_deg", 26.8)
+        self.declare_parameter("vis_aspect_target", 3.312)  # KITTI image ~1242/375
+        self.declare_parameter("vis_center_az", True)
 
         # topics
         self.declare_parameter("importance_topic", "roi_est/importance_map")
@@ -130,6 +140,15 @@ class RoiFrameLogger(Node):
         self.save_npy = bool(self.get_parameter("save_npy").value)
         self.gt_npz_path = os.path.expanduser(str(self.get_parameter("gt_npz_path").value).strip())
         self.split_masks_by_type = bool(self.get_parameter("split_masks_by_type").value)
+        self.save_vis_aligned = bool(self.get_parameter("save_vis_aligned").value)
+        self.vis_dir = str(self.get_parameter("vis_dir").value).strip() or "vis"
+        self.vis_flip_ud = bool(self.get_parameter("vis_flip_ud").value)
+        self.vis_flip_lr = bool(self.get_parameter("vis_flip_lr").value)
+        self.vis_stretch = bool(self.get_parameter("vis_stretch").value)
+        self.vis_hfov_deg = float(self.get_parameter("vis_hfov_deg").value)
+        self.vis_vfov_deg = float(self.get_parameter("vis_vfov_deg").value)
+        self.vis_center_az = bool(self.get_parameter("vis_center_az").value)
+        self.vis_aspect_target = float(self.get_parameter("vis_aspect_target").value)
 
         self.V = int(self.get_parameter("num_vertical_bins").value)
         self.H = int(self.get_parameter("num_horizontal_bins").value)
@@ -149,9 +168,17 @@ class RoiFrameLogger(Node):
         self.dir_maps = os.path.join(self.out_dir, "maps")
         self.dir_masks_base = os.path.join(self.out_dir, "masks")
         self.dir_rgb = os.path.join(self.out_dir, "rgb")
+        self.dir_vis = os.path.join(self.out_dir, self.vis_dir)
+        self.dir_vis_maps = os.path.join(self.dir_vis, "maps")
+        self.dir_vis_masks = os.path.join(self.dir_vis, "masks")
+        self.dir_vis_rgb = os.path.join(self.dir_vis, "rgb")
         os.makedirs(self.dir_maps, exist_ok=True)
         os.makedirs(self.dir_masks_base, exist_ok=True)
         os.makedirs(self.dir_rgb, exist_ok=True)
+        if self.save_vis_aligned:
+            os.makedirs(self.dir_vis_maps, exist_ok=True)
+            os.makedirs(self.dir_vis_masks, exist_ok=True)
+            os.makedirs(self.dir_vis_rgb, exist_ok=True)
 
         # ---- state ----
         self.cur_frame: Optional[int] = None
@@ -240,6 +267,38 @@ class RoiFrameLogger(Node):
         except Exception:
             return None
 
+    def _resize_nn(self, arr: np.ndarray, out_h: int, out_w: int) -> np.ndarray:
+        if out_h <= 0 or out_w <= 0:
+            return arr
+        in_h, in_w = arr.shape[:2]
+        if in_h == out_h and in_w == out_w:
+            return arr
+        y_idx = (np.linspace(0, in_h - 1, out_h)).round().astype(np.int32)
+        x_idx = (np.linspace(0, in_w - 1, out_w)).round().astype(np.int32)
+        if arr.ndim == 2:
+            return arr[y_idx[:, None], x_idx[None, :]]
+        return arr[y_idx[:, None], x_idx[None, :], :]
+
+    def _align_vis(self, arr: np.ndarray) -> np.ndarray:
+        out = arr
+        if self.vis_flip_ud:
+            out = out[::-1, ...]
+        if self.vis_flip_lr:
+            out = out[:, ::-1, ...]
+        if self.vis_center_az:
+            # roll horizontally by half width to center az=0
+            w = out.shape[1]
+            shift = int(w // 2)
+            out = np.roll(out, shift=shift, axis=1)
+        if self.vis_stretch:
+            h, w = out.shape[:2]
+            aspect_des = float(self.vis_aspect_target)
+            aspect_cur = float(w) / max(1e-6, float(h))
+            scale_w = aspect_des / max(1e-6, aspect_cur)
+            target_w = max(1, int(round(w * scale_w)))
+            out = self._resize_nn(out, h, target_w)
+        return out
+
     def _save_map(self, name: str, arr: np.ndarray, frame_idx: int):
         if self.save_npy:
             npy_path = os.path.join(self.dir_maps, f"{name}_{frame_idx:06d}.npy")
@@ -251,6 +310,11 @@ class RoiFrameLogger(Node):
             img_path = os.path.join(self.dir_maps, f"{name}_{frame_idx:06d}.{ext}")
             if not _try_save_image(img_path, img):
                 np.save(img_path + ".npy", img)
+            if self.save_vis_aligned:
+                vis = self._align_vis(img)
+                vis_path = os.path.join(self.dir_vis_maps, f"{name}_{frame_idx:06d}.{ext}")
+                if not _try_save_image(vis_path, vis):
+                    np.save(vis_path + ".npy", vis)
 
     def _save_mask(self, name: str, mask_u8: np.ndarray, frame_idx: int):
         if self.split_masks_by_type:
@@ -262,6 +326,13 @@ class RoiFrameLogger(Node):
         path = os.path.join(base_dir, f"{name}_{frame_idx:06d}.{ext}")
         if not _try_save_image(path, mask_u8):
             np.save(path + ".npy", mask_u8)
+        if self.save_vis_aligned:
+            vis = self._align_vis(mask_u8)
+            vis_dir = os.path.join(self.dir_vis_masks, name) if self.split_masks_by_type else self.dir_vis_masks
+            os.makedirs(vis_dir, exist_ok=True)
+            vis_path = os.path.join(vis_dir, f"{name}_{frame_idx:06d}.{ext}")
+            if not _try_save_image(vis_path, vis):
+                np.save(vis_path + ".npy", vis)
 
     def _save_roi_rgb(self, frame_idx: int, roi_use: np.ndarray, roi_alert: np.ndarray):
         rgb = np.zeros((roi_use.shape[0], roi_use.shape[1], 3), dtype=np.uint8)
@@ -270,6 +341,11 @@ class RoiFrameLogger(Node):
         path = os.path.join(self.dir_rgb, f"roi_rgb_{frame_idx:06d}.png")
         if not _try_save_image(path, rgb):
             np.save(path + ".npy", rgb)
+        if self.save_vis_aligned:
+            vis = self._align_vis(rgb)
+            vis_path = os.path.join(self.dir_vis_rgb, f"roi_rgb_{frame_idx:06d}.png")
+            if not _try_save_image(vis_path, vis):
+                np.save(vis_path + ".npy", vis)
 
     def _cb_importance(self, msg: Float32MultiArray):
         if not self.save_importance:

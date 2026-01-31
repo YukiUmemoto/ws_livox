@@ -214,13 +214,26 @@ def _dilate_bool(m: np.ndarray, r: int) -> np.ndarray:
     return out
 
 
-def gen_gt_mask_angular(boxes: List[Box3D], V: int, H: int, hfov_deg: float, vfov_deg: float) -> np.ndarray:
+def gen_gt_mask_angular(
+    boxes: List[Box3D],
+    V: int,
+    H: int,
+    hfov_deg: float,
+    vfov_deg: float,
+    vfov_up_deg: float | None = None,
+    vfov_down_deg: float | None = None,
+) -> np.ndarray:
     gt = np.zeros((V, H), dtype=np.uint8)
     if len(boxes) == 0:
         return gt
 
-    vmin = -vfov_deg * 0.5
-    vmax = +vfov_deg * 0.5
+    if vfov_up_deg is not None and vfov_down_deg is not None and (vfov_up_deg + vfov_down_deg) > 0:
+        vmin = -float(vfov_down_deg)
+        vmax = +float(vfov_up_deg)
+        vfov_deg = float(vfov_up_deg) + float(vfov_down_deg)
+    else:
+        vmin = -vfov_deg * 0.5
+        vmax = +vfov_deg * 0.5
 
     for b in boxes:
         corners = box_corners_3d(b)
@@ -267,7 +280,9 @@ def main():
     ap.add_argument("--V", type=int, default=128)
     ap.add_argument("--H", type=int, default=128)
     ap.add_argument("--hfov_deg", type=float, default=360.0)
-    ap.add_argument("--vfov_deg", type=float, default=60.0)
+    ap.add_argument("--vfov_deg", type=float, default=26.8)
+    ap.add_argument("--vfov_up_deg", type=float, default=2.0)
+    ap.add_argument("--vfov_down_deg", type=float, default=24.8)
     ap.add_argument("--start_idx", type=int, default=0)
     ap.add_argument("--end_idx", type=int, default=-1)
     ap.add_argument("--stride", type=int, default=1)
@@ -304,7 +319,21 @@ def main():
             tracklet_z_is_bottom=bool(args.tracklet_z_is_bottom),
             classes=[str(x) for x in args.classes],
         )
-        gt = gen_gt_mask_angular(boxes, args.V, args.H, args.hfov_deg, args.vfov_deg)
+        vfov_deg = float(args.vfov_deg)
+        vfov_up = float(args.vfov_up_deg)
+        vfov_down = float(args.vfov_down_deg)
+        if vfov_up + vfov_down <= 0:
+            vfov_up = vfov_deg * 0.5
+            vfov_down = vfov_deg * 0.5
+        gt = gen_gt_mask_angular(
+            boxes,
+            args.V,
+            args.H,
+            args.hfov_deg,
+            vfov_up + vfov_down,
+            vfov_up_deg=vfov_up,
+            vfov_down_deg=vfov_down,
+        )
         if args.dilate_r > 0:
             gt = (_dilate_bool(gt > 0, args.dilate_r).astype(np.uint8) * 255)
         gt_stack[i] = gt
