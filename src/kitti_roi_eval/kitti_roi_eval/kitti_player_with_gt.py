@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import glob
+import math
 import numpy as np
 
 import rclpy
@@ -21,6 +22,11 @@ from rclpy.time import Time
 from std_msgs.msg import Header, Int32, Bool
 from sensor_msgs.msg import PointCloud2, PointField
 from sensor_msgs_py import point_cloud2
+from geometry_msgs.msg import Point
+from std_msgs.msg import ColorRGBA
+from visualization_msgs.msg import Marker
+
+from kitti_roi_eval.offline_generate_gt_bbox import load_tracklets_xml, boxes_at_frame
 
 
 def qos_sensor(depth: int = 5) -> QoSProfile:
@@ -69,6 +75,17 @@ class KittiPlayerWithGT(Node):
 
         self.declare_parameter("qos_depth_pc", 5)
         self.declare_parameter("qos_depth_misc", 10)
+        # Optional bbox line marker publishing (default OFF to avoid side effects)
+        self.declare_parameter("publish_bbox_markers", False)
+        self.declare_parameter("bbox_topic", "kitti_player/bbox_lines")
+        self.declare_parameter("bbox_tracklet_xml", "")
+        self.declare_parameter("bbox_tracklet_z_is_bottom", True)
+        self.declare_parameter("bbox_classes", ["Car", "Van", "Truck", "Pedestrian", "Cyclist"])
+        self.declare_parameter("bbox_line_width", 0.08)
+        self.declare_parameter("bbox_color_r", 1.0)
+        self.declare_parameter("bbox_color_g", 0.2)
+        self.declare_parameter("bbox_color_b", 0.2)
+        self.declare_parameter("bbox_color_a", 1.0)
 
         # ---- read params ----
         drive_dir = str(self.get_parameter("drive_dir").value).strip()
@@ -90,6 +107,18 @@ class KittiPlayerWithGT(Node):
 
         qos_depth_pc = int(self.get_parameter("qos_depth_pc").value)
         qos_depth_misc = int(self.get_parameter("qos_depth_misc").value)
+        self.publish_bbox_markers = bool(self.get_parameter("publish_bbox_markers").value)
+        self.bbox_topic = str(self.get_parameter("bbox_topic").value)
+        self.bbox_tracklet_xml = str(self.get_parameter("bbox_tracklet_xml").value).strip()
+        self.bbox_tracklet_z_is_bottom = bool(self.get_parameter("bbox_tracklet_z_is_bottom").value)
+        self.bbox_classes = [str(x) for x in self.get_parameter("bbox_classes").value]
+        self.bbox_line_width = float(self.get_parameter("bbox_line_width").value)
+        self.bbox_color = ColorRGBA(
+            r=float(self.get_parameter("bbox_color_r").value),
+            g=float(self.get_parameter("bbox_color_g").value),
+            b=float(self.get_parameter("bbox_color_b").value),
+            a=float(self.get_parameter("bbox_color_a").value),
+        )
 
         # ---- locate .bin files ----
         velo_dir = os.path.join(self.drive_dir, "velodyne_points", "data")
@@ -110,6 +139,22 @@ class KittiPlayerWithGT(Node):
         self.pub_pc = self.create_publisher(PointCloud2, self.points_topic, qos_sensor(qos_depth_pc))
         self.pub_idx = self.create_publisher(Int32, self.frame_idx_topic, qos_reliable(qos_depth_misc))
         self.pub_done = self.create_publisher(Bool, self.done_topic, qos_reliable(qos_depth_misc))
+        self.pub_bbox = None
+        self.tracklets = []
+        if self.publish_bbox_markers:
+            tracklet_xml = self.bbox_tracklet_xml
+            if tracklet_xml == "":
+                tracklet_xml = os.path.join(self.drive_dir, "tracklet_labels.xml")
+            tracklet_xml = os.path.expanduser(tracklet_xml)
+            try:
+                self.tracklets = load_tracklets_xml(tracklet_xml)
+                self.pub_bbox = self.create_publisher(Marker, self.bbox_topic, qos_reliable(qos_depth_misc))
+            except Exception as e:
+                self.get_logger().warn(
+                    f"publish_bbox_markers=true but failed to load tracklets ({tracklet_xml}): {e}. "
+                    "Disable bbox marker publishing."
+                )
+                self.publish_bbox_markers = False
 
         # ---- state ----
         self.cur = int(self.start_idx)
@@ -127,7 +172,68 @@ class KittiPlayerWithGT(Node):
             f"  rate_hz={self.rate_hz}\n"
             f"  use_sim_stamp={self.use_sim_stamp}\n"
             f"  topics: points={self.points_topic}, frame_idx={self.frame_idx_topic}, done={self.done_topic}\n"
+            f"  publish_bbox_markers={self.publish_bbox_markers} topic={self.bbox_topic}\n"
         )
+
+    def _box_corners_3d(self, box) -> np.ndarray:
+        l2 = float(box.l) * 0.5
+        w2 = float(box.w) * 0.5
+        h2 = float(box.h) * 0.5
+        corners_local = np.array(
+            [
+                [l2, w2, h2],
+                [l2, -w2, h2],
+                [-l2, -w2, h2],
+                [-l2, w2, h2],
+                [l2, w2, -h2],
+                [l2, -w2, -h2],
+                [-l2, -w2, -h2],
+                [-l2, w2, -h2],
+            ],
+            dtype=np.float64,
+        )
+        c = math.cos(float(box.yaw))
+        s = math.sin(float(box.yaw))
+        r = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]], dtype=np.float64)
+        t = np.array([float(box.cx), float(box.cy), float(box.cz)], dtype=np.float64)
+        return (corners_local @ r.T) + t[None, :]
+
+    def _publish_bbox_marker(self, header: Header, frame_idx: int):
+        if not self.publish_bbox_markers or self.pub_bbox is None:
+            return
+        boxes = boxes_at_frame(
+            self.tracklets,
+            int(frame_idx),
+            tracklet_z_is_bottom=self.bbox_tracklet_z_is_bottom,
+            classes=self.bbox_classes,
+        )
+        marker = Marker()
+        marker.header = header
+        marker.ns = "kitti_bbox"
+        marker.id = 0
+        marker.type = Marker.LINE_LIST
+        marker.action = Marker.ADD
+        marker.scale.x = float(max(0.001, self.bbox_line_width))
+        marker.color = self.bbox_color
+        marker.pose.orientation.w = 1.0
+        marker.lifetime.sec = 0
+        marker.lifetime.nanosec = 0
+
+        # 12 box edges (pairs of corner indices)
+        edges = [
+            (0, 1), (1, 2), (2, 3), (3, 0),
+            (4, 5), (5, 6), (6, 7), (7, 4),
+            (0, 4), (1, 5), (2, 6), (3, 7),
+        ]
+        pts = []
+        for b in boxes:
+            c = self._box_corners_3d(b)
+            for i, j in edges:
+                p1 = Point(x=float(c[i, 0]), y=float(c[i, 1]), z=float(c[i, 2]))
+                p2 = Point(x=float(c[j, 0]), y=float(c[j, 1]), z=float(c[j, 2]))
+                pts.extend([p1, p2])
+        marker.points = pts
+        self.pub_bbox.publish(marker)
 
     def _make_sim_stamp(self, frame_idx: int) -> Time:
         # t = frame_idx / rate_hz
@@ -199,6 +305,7 @@ class KittiPlayerWithGT(Node):
         ]
         pc2 = point_cloud2.create_cloud(header, fields, xyz)
         self.pub_pc.publish(pc2)
+        self._publish_bbox_marker(header, self.cur)
 
         self.cur += max(1, int(self.stride))
 

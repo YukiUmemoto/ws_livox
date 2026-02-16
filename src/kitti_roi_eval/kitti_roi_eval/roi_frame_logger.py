@@ -85,6 +85,7 @@ class RoiFrameLogger(Node):
         self.declare_parameter("save_omega", False)
         self.declare_parameter("save_rel_low", False)
         self.declare_parameter("save_gt_mask", False)
+        self.declare_parameter("save_gt_bbox", False)
         self.declare_parameter("save_npy", True)
         self.declare_parameter("save_range", False)  # ignored (compat)
         self.declare_parameter("gt_npz_path", "")
@@ -137,6 +138,7 @@ class RoiFrameLogger(Node):
         self.save_omega = bool(self.get_parameter("save_omega").value)
         self.save_rel_low = bool(self.get_parameter("save_rel_low").value)
         self.save_gt_mask = bool(self.get_parameter("save_gt_mask").value)
+        self.save_gt_bbox = bool(self.get_parameter("save_gt_bbox").value)
         self.save_npy = bool(self.get_parameter("save_npy").value)
         self.gt_npz_path = os.path.expanduser(str(self.get_parameter("gt_npz_path").value).strip())
         self.split_masks_by_type = bool(self.get_parameter("split_masks_by_type").value)
@@ -170,7 +172,9 @@ class RoiFrameLogger(Node):
         self.dir_rgb = os.path.join(self.out_dir, "rgb")
         self.dir_vis = os.path.join(self.out_dir, self.vis_dir)
         self.dir_vis_maps = os.path.join(self.dir_vis, "maps")
-        self.dir_vis_masks = os.path.join(self.dir_vis, "masks")
+        # Keep both "mask" (new requested path) and "masks" (legacy path).
+        self.dir_vis_masks = os.path.join(self.dir_vis, "mask")
+        self.dir_vis_masks_legacy = os.path.join(self.dir_vis, "masks")
         self.dir_vis_rgb = os.path.join(self.dir_vis, "rgb")
         os.makedirs(self.dir_maps, exist_ok=True)
         os.makedirs(self.dir_masks_base, exist_ok=True)
@@ -178,6 +182,7 @@ class RoiFrameLogger(Node):
         if self.save_vis_aligned:
             os.makedirs(self.dir_vis_maps, exist_ok=True)
             os.makedirs(self.dir_vis_masks, exist_ok=True)
+            os.makedirs(self.dir_vis_masks_legacy, exist_ok=True)
             os.makedirs(self.dir_vis_rgb, exist_ok=True)
 
         # ---- state ----
@@ -190,7 +195,7 @@ class RoiFrameLogger(Node):
         self._gt_stack = None
         self._gt_saved = set()
 
-        if self.save_gt_mask and self.gt_npz_path:
+        if (self.save_gt_bbox or self.save_gt_mask) and self.gt_npz_path:
             try:
                 z = np.load(self.gt_npz_path, allow_pickle=True)
                 self._gt_stack = z["gt"].astype(np.uint8)
@@ -236,7 +241,18 @@ class RoiFrameLogger(Node):
                 gi = self._gt_map.get(fi, None)
                 if gi is not None:
                     gt = self._gt_stack[int(gi)]
+                    # Legacy behavior: when save_gt_mask=true and gt_npz_path is set,
+                    # save NPZ GT as gt_mask.
                     self._save_mask("gt_mask", (gt > 0).astype(np.uint8) * 255, fi)
+                    self._gt_saved.add(fi)
+
+        if self.save_gt_bbox and self._gt_stack is not None:
+            fi = self.cur_frame
+            if self._should_save(fi):
+                gi = self._gt_map.get(fi, None)
+                if gi is not None:
+                    gt = self._gt_stack[int(gi)]
+                    self._save_mask("gt_bbox", (gt > 0).astype(np.uint8) * 255, fi)
                     self._gt_saved.add(fi)
 
     def _should_save(self, frame_idx: Optional[int]) -> bool:
@@ -333,6 +349,17 @@ class RoiFrameLogger(Node):
             vis_path = os.path.join(vis_dir, f"{name}_{frame_idx:06d}.{ext}")
             if not _try_save_image(vis_path, vis):
                 np.save(vis_path + ".npy", vis)
+            # Also save into legacy vis/masks path for backward compatibility.
+            vis_dir_legacy = (
+                os.path.join(self.dir_vis_masks_legacy, name)
+                if self.split_masks_by_type
+                else self.dir_vis_masks_legacy
+            )
+            os.makedirs(vis_dir_legacy, exist_ok=True)
+            vis_path_legacy = os.path.join(vis_dir_legacy, f"{name}_{frame_idx:06d}.{ext}")
+            if vis_path_legacy != vis_path:
+                if not _try_save_image(vis_path_legacy, vis):
+                    np.save(vis_path_legacy + ".npy", vis)
 
     def _save_roi_rgb(self, frame_idx: int, roi_use: np.ndarray, roi_alert: np.ndarray):
         rgb = np.zeros((roi_use.shape[0], roi_use.shape[1], 3), dtype=np.uint8)

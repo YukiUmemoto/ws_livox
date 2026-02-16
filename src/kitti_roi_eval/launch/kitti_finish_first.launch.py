@@ -19,6 +19,10 @@ def generate_launch_description():
     # bins
     V = LaunchConfiguration("V")
     H = LaunchConfiguration("H")
+    horizontal_fov_deg = LaunchConfiguration("horizontal_fov_deg")
+    vertical_fov_deg = LaunchConfiguration("vertical_fov_deg")
+    vertical_fov_up_deg = LaunchConfiguration("vertical_fov_up_deg")
+    vertical_fov_down_deg = LaunchConfiguration("vertical_fov_down_deg")
 
     # GT / cover
     gt_npz = LaunchConfiguration("gt_npz")
@@ -62,6 +66,10 @@ def generate_launch_description():
         DeclareLaunchArgument("stride", default_value="1"),
         DeclareLaunchArgument("V", default_value="128"),
         DeclareLaunchArgument("H", default_value="128"),
+        DeclareLaunchArgument("horizontal_fov_deg", default_value="360.0"),
+        DeclareLaunchArgument("vertical_fov_deg", default_value="26.8"),
+        DeclareLaunchArgument("vertical_fov_up_deg", default_value="2.0"),
+        DeclareLaunchArgument("vertical_fov_down_deg", default_value="24.8"),
         DeclareLaunchArgument("out_dir", default_value=""),
 
         # ---- GT / cover ----
@@ -144,6 +152,11 @@ def generate_launch_description():
                 "H": ParameterValue(H, value_type=int),
                 "num_vertical_bins": ParameterValue(V, value_type=int),
                 "num_horizontal_bins": ParameterValue(H, value_type=int),
+                "horizontal_fov_deg": ParameterValue(horizontal_fov_deg, value_type=float),
+                "vertical_fov_deg": ParameterValue(vertical_fov_deg, value_type=float),
+                "vertical_fov_up_deg": ParameterValue(vertical_fov_up_deg, value_type=float),
+                "vertical_fov_down_deg": ParameterValue(vertical_fov_down_deg, value_type=float),
+                "azimuth_0_to_hfov": True,
                 "roi_top_percent": ParameterValue(roi_top_percent, value_type=float),
 
                 # 重い処理はOFF（完走優先）

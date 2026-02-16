@@ -122,6 +122,9 @@ class PointCloudPerturber(Node):
         # ======================
         self.declare_parameter("horizontal_fov_deg", 70.4)
         self.declare_parameter("vertical_fov_deg", 77.2)
+        self.declare_parameter("vertical_fov_up_deg", -1.0)
+        self.declare_parameter("vertical_fov_down_deg", -1.0)
+        self.declare_parameter("azimuth_0_to_hfov", True)
         self.declare_parameter("num_horizontal_bins", 128)
         self.declare_parameter("num_vertical_bins", 128)
 
@@ -155,13 +158,21 @@ class PointCloudPerturber(Node):
 
         self.Hfov = float(self.get_parameter("horizontal_fov_deg").value)
         self.Vfov = float(self.get_parameter("vertical_fov_deg").value)
+        self.Vfov_up = float(self.get_parameter("vertical_fov_up_deg").value)
+        self.Vfov_down = float(self.get_parameter("vertical_fov_down_deg").value)
+        self.azimuth_0_to_hfov = bool(self.get_parameter("azimuth_0_to_hfov").value)
         self.H = int(self.get_parameter("num_horizontal_bins").value)
         self.V = int(self.get_parameter("num_vertical_bins").value)
 
-        self.theta_min = math.radians(-self.Hfov / 2.0)
-        self.theta_max = math.radians(+self.Hfov / 2.0)
-        self.phi_min = math.radians(-self.Vfov / 2.0)
-        self.phi_max = math.radians(+self.Vfov / 2.0)
+        self.theta_min = math.radians(0.0 if self.azimuth_0_to_hfov else (-self.Hfov / 2.0))
+        self.theta_max = math.radians(self.Hfov if self.azimuth_0_to_hfov else (+self.Hfov / 2.0))
+        if self.Vfov_up > 0.0 and self.Vfov_down > 0.0 and (self.Vfov_up + self.Vfov_down) > 0.0:
+            self.phi_min = math.radians(-self.Vfov_down)
+            self.phi_max = math.radians(+self.Vfov_up)
+            self.Vfov = self.Vfov_up + self.Vfov_down
+        else:
+            self.phi_min = math.radians(-self.Vfov / 2.0)
+            self.phi_max = math.radians(+self.Vfov / 2.0)
         self.d_theta = (self.theta_max - self.theta_min) / self.H
         self.d_phi = (self.phi_max - self.phi_min) / self.V
 
@@ -197,7 +208,10 @@ class PointCloudPerturber(Node):
 
     def _bin_index(self, x: np.ndarray, y: np.ndarray, z: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         r = np.sqrt(x * x + y * y + z * z)
-        theta = np.arctan2(y, x)
+        if self.azimuth_0_to_hfov:
+            theta = np.mod(np.arctan2(y, x), 2.0 * math.pi)
+        else:
+            theta = np.arctan2(y, x)
         xy = np.sqrt(x * x + y * y)
         phi = np.arctan2(z, xy)
 
@@ -415,4 +429,3 @@ def main(args=None):
 
 if __name__ == "__main__":
     main()
-

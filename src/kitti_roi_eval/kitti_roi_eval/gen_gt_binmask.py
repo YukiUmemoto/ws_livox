@@ -214,6 +214,17 @@ def _dilate_bool(m: np.ndarray, r: int) -> np.ndarray:
     return out
 
 
+def _align_binmap(m: np.ndarray, flip_ud: bool, flip_lr: bool, center_az: bool) -> np.ndarray:
+    out = m
+    if flip_ud:
+        out = out[::-1, :]
+    if flip_lr:
+        out = out[:, ::-1]
+    if center_az:
+        out = np.roll(out, shift=(out.shape[1] // 2), axis=1)
+    return out
+
+
 def gen_gt_mask_angular(
     boxes: List[Box3D],
     V: int,
@@ -289,6 +300,9 @@ def main():
     ap.add_argument("--classes", nargs="*", default=["Car", "Van", "Truck", "Pedestrian", "Cyclist"])
     ap.add_argument("--tracklet_z_is_bottom", action="store_true", default=True)
     ap.add_argument("--dilate_r", type=int, default=0)
+    ap.add_argument("--align_flip_ud", action="store_true", default=False)
+    ap.add_argument("--align_flip_lr", action="store_true", default=False)
+    ap.add_argument("--align_center_az", action="store_true", default=False)
     args = ap.parse_args()
 
     drive_dir = os.path.expanduser(args.drive_dir)
@@ -336,6 +350,12 @@ def main():
         )
         if args.dilate_r > 0:
             gt = (_dilate_bool(gt > 0, args.dilate_r).astype(np.uint8) * 255)
+        gt = _align_binmap(
+            gt,
+            flip_ud=bool(args.align_flip_ud),
+            flip_lr=bool(args.align_flip_lr),
+            center_az=bool(args.align_center_az),
+        )
         gt_stack[i] = gt
 
         if (i % 20) == 0:
@@ -352,6 +372,9 @@ def main():
         hfov_deg=np.float64(args.hfov_deg),
         vfov_deg=np.float64(args.vfov_deg),
         dilate_r=np.int32(args.dilate_r),
+        align_flip_ud=np.uint8(1 if args.align_flip_ud else 0),
+        align_flip_lr=np.uint8(1 if args.align_flip_lr else 0),
+        align_center_az=np.uint8(1 if args.align_center_az else 0),
         classes=np.array([str(x) for x in args.classes], dtype=object),
         drive_dir=np.array(drive_dir, dtype=object),
         tracklet_xml=np.array(tracklet_xml, dtype=object),

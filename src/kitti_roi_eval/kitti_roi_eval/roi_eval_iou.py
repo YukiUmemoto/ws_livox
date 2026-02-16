@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 import csv
 import time
+from collections import deque
 from typing import Dict, Tuple, Optional, List, Any
 
 import numpy as np
@@ -15,6 +16,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 
 from sensor_msgs.msg import Image, PointCloud2
+from std_msgs.msg import Int32
 import matplotlib.pyplot as plt
 
 from matplotlib.colors import ListedColormap, BoundaryNorm
@@ -80,9 +82,16 @@ class RoiIoUEvaluator(Node):
         self.declare_parameter("out_dir", "")
         self.declare_parameter("csv_name", "iou_per_frame.csv")
         self.declare_parameter("warmup_sec", 5.0)
+        self.declare_parameter("sync_policy", "stamp")  # stamp | strict_stamp
+        self.declare_parameter("frame_idx_mode", "after_warmup")  # after_warmup | topic
+        self.declare_parameter("frame_idx_topic", "kitti_player/frame_idx")
+        self.declare_parameter("sequential_mode", False)  # frame_idx を到着順に1対1対応
+        self.declare_parameter("write_missing_tail_rows", True)
+        self.declare_parameter("qos_meta_depth", 50)
+        self.declare_parameter("qos_meta_reliable", False)
 
         self.declare_parameter("viz_enable", True)
-        self.declare_parameter("viz_max_frames", 10)
+        self.declare_parameter("viz_max_frames", 100000)
 
         self.declare_parameter("cache_max_entries", 300)
 
@@ -99,6 +108,26 @@ class RoiIoUEvaluator(Node):
 
         self.csv_path = os.path.join(self.out_dir, str(self.get_parameter("csv_name").value))
         self.warmup_sec = float(self.get_parameter("warmup_sec").value)
+        self.sync_policy = str(self.get_parameter("sync_policy").value).strip().lower()
+        if self.sync_policy not in ("stamp", "strict_stamp"):
+            self.get_logger().warn(f"Unknown sync_policy='{self.sync_policy}', fallback to 'stamp'.")
+            self.sync_policy = "stamp"
+        self.frame_idx_mode = str(self.get_parameter("frame_idx_mode").value).strip().lower()
+        if self.frame_idx_mode not in ("after_warmup", "topic"):
+            self.get_logger().warn(
+                f"Unknown frame_idx_mode='{self.frame_idx_mode}', fallback to 'after_warmup'."
+            )
+            self.frame_idx_mode = "after_warmup"
+        self.frame_idx_topic = str(self.get_parameter("frame_idx_topic").value)
+        self.sequential_mode = bool(self.get_parameter("sequential_mode").value)
+        self.write_missing_tail_rows = bool(self.get_parameter("write_missing_tail_rows").value)
+        if self.sync_policy == "strict_stamp":
+            self.frame_idx_mode = "topic"
+            if self.sequential_mode:
+                self.get_logger().warn(
+                    "sync_policy=strict_stamp ignores sequential_mode. Force sequential_mode=False."
+                )
+            self.sequential_mode = False
 
         self.viz_enable = bool(self.get_parameter("viz_enable").value)
         self.viz_max = int(self.get_parameter("viz_max_frames").value)
@@ -115,11 +144,20 @@ class RoiIoUEvaluator(Node):
 
         self.frame_count = 0
         self.rows: List[List[float]] = []
+        self._latest_frame_idx: Optional[int] = None
+        self._frame_idx_queue: deque[int] = deque()
+        self._pc_points_queue: deque[int] = deque()
+        self._pc_stamp_queue: deque[Tuple[int, int]] = deque()
+        self._stamp_to_frame_idx: Dict[Tuple[int, int], int] = {}
+        self._frame_idx_to_stamp: Dict[int, Tuple[int, int]] = {}
+        self._stamp_points: Dict[Tuple[int, int], int] = {}
+        self._evaluated_frame_idx: set[int] = set()
 
         # CSV open
         self._fp = open(self.csv_path, "w", newline="")
         self._wr = csv.writer(self._fp)
         self._wr.writerow([
+            "frame_idx",
             "frame_idx_after_warmup",
             "stamp_sec",
             "stamp_nanosec",
@@ -136,14 +174,28 @@ class RoiIoUEvaluator(Node):
             "gt_cover_ratio",
             "points_in_frame",
             "total_bins",
+            "missing_data",
         ])
         self._fp.flush()
 
         qos = make_qos(10)
+        qos_meta = make_qos(
+            int(self.get_parameter("qos_meta_depth").value)
+        ) if not bool(self.get_parameter("qos_meta_reliable").value) else QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.VOLATILE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=int(max(1, int(self.get_parameter("qos_meta_depth").value))),
+        )
         self.sub_pred = self.create_subscription(Image, self.pred_topic, self._cb_pred, qos)
         self.sub_gt = self.create_subscription(Image, self.gt_topic, self._cb_gt, qos)
         self.sub_omega = self.create_subscription(Image, self.omega_topic, self._cb_omega, qos)
         self.sub_pc = self.create_subscription(PointCloud2, self.pc_topic, self._cb_pc, qos)
+        self.sub_frame_idx = None
+        if self.frame_idx_mode == "topic":
+            self.sub_frame_idx = self.create_subscription(
+                Int32, self.frame_idx_topic, self._cb_frame_idx, qos_meta
+            )
 
         self.get_logger().info(
             "RoiIoUEvaluator started.\n"
@@ -154,8 +206,32 @@ class RoiIoUEvaluator(Node):
             f"  out_dir={self.out_dir}\n"
             f"  csv={self.csv_path}\n"
             f"  warmup_sec={self.warmup_sec}\n"
+            f"  sync_policy={self.sync_policy}\n"
+            f"  frame_idx_mode={self.frame_idx_mode}\n"
+            f"  frame_idx_topic={self.frame_idx_topic}\n"
+            f"  sequential_mode={self.sequential_mode}\n"
             f"  cache_max_entries={self.cache_max_entries}\n"
         )
+
+    def _cb_frame_idx(self, msg: Int32):
+        self._latest_frame_idx = int(msg.data)
+        if self.sync_policy == "strict_stamp":
+            self._frame_idx_queue.append(int(msg.data))
+            paired_keys = self._pair_frameidx_with_pc_stamp()
+            for key in paired_keys:
+                d = self.cache.get(key)
+                if d is not None and ("pred" in d) and ("gt" in d) and ("omega" in d):
+                    self._evaluate_one(
+                        key,
+                        d["pred"],
+                        d["gt"],
+                        d["omega"],
+                        int(d.get("n_points", self._stamp_points.get(key, -1))),
+                    )
+                    self.cache.pop(key, None)
+            return
+        if self.frame_idx_mode == "topic" and self.sequential_mode:
+            self._frame_idx_queue.append(int(msg.data))
 
     def _cb_pred(self, msg: Image):
         self._store_img("pred", msg)
@@ -172,6 +248,23 @@ class RoiIoUEvaluator(Node):
             self.first_stamp = key
 
         n = pc2_num_points(msg)
+        if self.frame_idx_mode == "topic" and self.sequential_mode:
+            self._pc_points_queue.append(int(n))
+        self._stamp_points[key] = int(n)
+        if self.sync_policy == "strict_stamp":
+            self._pc_stamp_queue.append(key)
+            paired_keys = self._pair_frameidx_with_pc_stamp()
+            for pkey in paired_keys:
+                d2 = self.cache.get(pkey)
+                if d2 is not None and ("pred" in d2) and ("gt" in d2) and ("omega" in d2):
+                    self._evaluate_one(
+                        pkey,
+                        d2["pred"],
+                        d2["gt"],
+                        d2["omega"],
+                        int(d2.get("n_points", self._stamp_points.get(pkey, -1))),
+                    )
+                    self.cache.pop(pkey, None)
         d = self.cache.get(key)
         if d is None:
             d = {}
@@ -191,6 +284,16 @@ class RoiIoUEvaluator(Node):
         while len(self.cache) > max(10, self.cache_max_entries):
             oldest = next(iter(self.cache))
             self.cache.pop(oldest, None)
+
+    def _pair_frameidx_with_pc_stamp(self) -> List[Tuple[int, int]]:
+        paired: List[Tuple[int, int]] = []
+        while len(self._frame_idx_queue) > 0 and len(self._pc_stamp_queue) > 0:
+            fidx = int(self._frame_idx_queue.popleft())
+            skey = self._pc_stamp_queue.popleft()
+            self._stamp_to_frame_idx[skey] = fidx
+            self._frame_idx_to_stamp[fidx] = skey
+            paired.append(skey)
+        return paired
 
     def _store_img(self, kind: str, msg: Image):
         key = stamp_key_img(msg)
@@ -229,6 +332,17 @@ class RoiIoUEvaluator(Node):
     ):
         if self._elapsed(key) < self.warmup_sec:
             return
+        if self.sync_policy == "strict_stamp":
+            if key not in self._stamp_to_frame_idx:
+                return
+            frame_idx_out = int(self._stamp_to_frame_idx[key])
+            if frame_idx_out in self._evaluated_frame_idx:
+                return
+            n_points = int(self._stamp_points.get(key, n_points))
+        if self.frame_idx_mode == "topic" and (not self.sequential_mode) and self._latest_frame_idx is None:
+            # frame_idx がまだ来ていない間は記録しない（cover_logger と同様に frame_idx 主導）
+            if self.sync_policy != "strict_stamp":
+                return
 
         t0 = time.perf_counter()
 
@@ -269,7 +383,23 @@ class RoiIoUEvaluator(Node):
         t1 = time.perf_counter()
         proc_time_ms = (t1 - t0) * 1e3
 
+        if self.sync_policy == "strict_stamp":
+            pass
+        elif self.frame_idx_mode == "topic":
+            if self.sequential_mode:
+                if len(self._frame_idx_queue) == 0:
+                    return
+                frame_idx_out = int(self._frame_idx_queue.popleft())
+            else:
+                frame_idx_out = int(self._latest_frame_idx) if self._latest_frame_idx is not None else int(self.frame_count)
+        else:
+            frame_idx_out = int(self.frame_count)
+
+        if self.frame_idx_mode == "topic" and self.sequential_mode and len(self._pc_points_queue) > 0:
+            n_points = int(self._pc_points_queue.popleft())
+
         row = [
+            frame_idx_out,
             int(self.frame_count),
             int(key[0]),
             int(key[1]),
@@ -286,15 +416,18 @@ class RoiIoUEvaluator(Node):
             float(gt_cover_ratio),
             int(n_points),
             int(total_bins),
+            0,
         ]
         self._wr.writerow(row)
         self._fp.flush()
 
         self.rows.append(row)
         self.frame_count += 1
+        if self.sync_policy == "strict_stamp":
+            self._evaluated_frame_idx.add(int(frame_idx_out))
 
         if self.viz_enable and self.frame_count <= self.viz_max:
-            self._save_viz(self.frame_count, pred_b, gt_b, valid)
+            self._save_viz(frame_idx_out, pred_b, gt_b, valid)
 
         if (self.frame_count % 10) == 0:
             self.get_logger().info(
@@ -332,7 +465,7 @@ class RoiIoUEvaluator(Node):
 
         plt.figure(figsize=(6, 4))
         plt.imshow(vis, cmap=cmap, norm=norm, interpolation="nearest")
-        plt.title("0:bg, 1:TP, 2:FP, 3:FN (on Omega)")
+        plt.title("0:bg, 1:TP, 2:FP, 3:FN")
         plt.axis("off")
         plt.colorbar(ticks=[0, 1, 2, 3], fraction=0.046, pad=0.04)
         plt.tight_layout()
@@ -340,6 +473,92 @@ class RoiIoUEvaluator(Node):
         plt.close()
 
     def destroy_node(self):
+        if self.sync_policy == "strict_stamp" and self.write_missing_tail_rows:
+            for fidx, skey in sorted(self._frame_idx_to_stamp.items(), key=lambda kv: kv[0]):
+                if int(fidx) in self._evaluated_frame_idx:
+                    continue
+                row = [
+                    int(fidx),             # frame_idx
+                    int(self.frame_count), # frame_idx_after_warmup
+                    int(skey[0]),          # stamp_sec
+                    int(skey[1]),          # stamp_nanosec
+                    float("nan"),          # iou
+                    float("nan"),          # precision
+                    float("nan"),          # recall
+                    float("nan"),          # f1
+                    -1,                    # gt_bins
+                    -1,                    # pred_bins
+                    -1,                    # omega_bins
+                    1,                     # empty_union0
+                    float("nan"),          # proc_time_ms
+                    float("nan"),          # gt_cover_ratio
+                    int(self._stamp_points.get(skey, -1)),  # points
+                    -1,                    # total_bins
+                    1,                     # missing_data
+                ]
+                try:
+                    self._wr.writerow(row)
+                    self.rows.append(row)
+                    self.frame_count += 1
+                except Exception:
+                    pass
+            while len(self._frame_idx_queue) > 0:
+                fidx = int(self._frame_idx_queue.popleft())
+                row = [
+                    fidx,                  # frame_idx
+                    int(self.frame_count), # frame_idx_after_warmup
+                    -1,                    # stamp_sec
+                    -1,                    # stamp_nanosec
+                    float("nan"),          # iou
+                    float("nan"),          # precision
+                    float("nan"),          # recall
+                    float("nan"),          # f1
+                    -1,                    # gt_bins
+                    -1,                    # pred_bins
+                    -1,                    # omega_bins
+                    1,                     # empty_union0
+                    float("nan"),          # proc_time_ms
+                    float("nan"),          # gt_cover_ratio
+                    -1,                    # points
+                    -1,                    # total_bins
+                    1,                     # missing_data
+                ]
+                try:
+                    self._wr.writerow(row)
+                    self.rows.append(row)
+                    self.frame_count += 1
+                except Exception:
+                    pass
+        elif self.frame_idx_mode == "topic" and self.sequential_mode and self.write_missing_tail_rows:
+            # frame_idx は来たが pred/gt/omega が揃わなかった末尾分を欠損行として残す
+            while len(self._frame_idx_queue) > 0:
+                fidx = int(self._frame_idx_queue.popleft())
+                row = [
+                    fidx,                  # frame_idx
+                    int(self.frame_count), # frame_idx_after_warmup
+                    -1,                    # stamp_sec
+                    -1,                    # stamp_nanosec
+                    float("nan"),          # iou
+                    float("nan"),          # precision
+                    float("nan"),          # recall
+                    float("nan"),          # f1
+                    -1,                    # gt_bins
+                    -1,                    # pred_bins
+                    -1,                    # omega_bins
+                    1,                     # empty_union0
+                    float("nan"),          # proc_time_ms
+                    float("nan"),          # gt_cover_ratio
+                    int(self._pc_points_queue.popleft()) if len(self._pc_points_queue) > 0 else -1,  # points
+                    -1,                    # total_bins
+                    1,                     # missing_data
+                ]
+                try:
+                    self._wr.writerow(row)
+                    self.rows.append(row)
+                    self.frame_count += 1
+                except Exception:
+                    pass
+
         try:
             if self._fp is not None:
                 try:
@@ -360,12 +579,22 @@ class RoiIoUEvaluator(Node):
 
     def _write_summary_and_plots(self):
         arr = np.array(self.rows, dtype=np.float64)
+        if arr.shape[0] == 0:
+            return
+        if arr.shape[1] > 16:
+            valid_rows = np.isfinite(arr[:, 16]) & (arr[:, 16] < 0.5)
+        else:
+            valid_rows = np.ones((arr.shape[0],), dtype=bool)
+        if not np.any(valid_rows):
+            self.get_logger().warn("No valid rows for summary/plot.")
+            return
+        arr = arr[valid_rows]
         frame_idx = arr[:, 0]
-        iou = arr[:, 3]
-        prec = arr[:, 4]
-        rec = arr[:, 5]
-        f1 = arr[:, 6]
-        empty = arr[:, 10]
+        iou = arr[:, 4]
+        prec = arr[:, 5]
+        rec = arr[:, 6]
+        f1 = arr[:, 7]
+        empty = arr[:, 11]
 
         def _p95(x: np.ndarray) -> float:
             return float(np.percentile(x, 95))
@@ -385,7 +614,7 @@ class RoiIoUEvaluator(Node):
         plt.plot(frame_idx, prec, label="Precision")
         plt.plot(frame_idx, rec, label="Recall")
         plt.plot(frame_idx, f1, label="F1")
-        plt.xlabel("frame_idx (after warmup)")
+        plt.xlabel("frame_idx")
         plt.ylabel("score")
         plt.ylim(0.0, 1.0)
         plt.grid(True)

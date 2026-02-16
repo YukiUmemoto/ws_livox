@@ -143,6 +143,9 @@ class ImportantROIWithReliability(Node):
         # ===== Binning =====
         self.declare_parameter("horizontal_fov_deg", 70.4)
         self.declare_parameter("vertical_fov_deg", 77.2)
+        self.declare_parameter("vertical_fov_up_deg", -1.0)
+        self.declare_parameter("vertical_fov_down_deg", -1.0)
+        self.declare_parameter("azimuth_0_to_hfov", True)
         self.declare_parameter("num_horizontal_bins", 128)
         self.declare_parameter("num_vertical_bins", 128)
 
@@ -157,14 +160,14 @@ class ImportantROIWithReliability(Node):
         self.declare_parameter("roi_top_percent", 10.0)
 
         # ===== Reliability (bin) =====
-        self.declare_parameter("w_m", 0.4)
-        self.declare_parameter("w_d", 0.3)
-        self.declare_parameter("w_n", 0.3)
+        self.declare_parameter("w_m", 0.45)
+        self.declare_parameter("w_d", 0.35)
+        self.declare_parameter("w_n", 0.20)
         self.declare_parameter("scale_d_m", 0.5)
         self.declare_parameter("n_floor", 1.0)
         self.declare_parameter("sigmoid_beta", 8.0)
-        self.declare_parameter("sigmoid_center_c", 0.6)
-        self.declare_parameter("tau_rel", 0.8)
+        self.declare_parameter("sigmoid_center_c", 0.55)
+        self.declare_parameter("tau_rel", 0.85)
 
         # ===== Outputs =====
         self.declare_parameter("publish_masked_maps", True)
@@ -196,13 +199,21 @@ class ImportantROIWithReliability(Node):
         self.input_topic = self.get_parameter("input_topic").value
         self.Hfov = float(self.get_parameter("horizontal_fov_deg").value)
         self.Vfov = float(self.get_parameter("vertical_fov_deg").value)
+        self.Vfov_up = float(self.get_parameter("vertical_fov_up_deg").value)
+        self.Vfov_down = float(self.get_parameter("vertical_fov_down_deg").value)
+        self.azimuth_0_to_hfov = bool(self.get_parameter("azimuth_0_to_hfov").value)
         self.H = int(self.get_parameter("num_horizontal_bins").value)
         self.V = int(self.get_parameter("num_vertical_bins").value)
 
-        self.theta_min = math.radians(-self.Hfov / 2.0)
-        self.theta_max = math.radians(+self.Hfov / 2.0)
-        self.phi_min = math.radians(-self.Vfov / 2.0)
-        self.phi_max = math.radians(+self.Vfov / 2.0)
+        self.theta_min = math.radians(0.0 if self.azimuth_0_to_hfov else (-self.Hfov / 2.0))
+        self.theta_max = math.radians(self.Hfov if self.azimuth_0_to_hfov else (+self.Hfov / 2.0))
+        if self.Vfov_up > 0.0 and self.Vfov_down > 0.0 and (self.Vfov_up + self.Vfov_down) > 0.0:
+            self.phi_min = math.radians(-self.Vfov_down)
+            self.phi_max = math.radians(+self.Vfov_up)
+            self.Vfov = self.Vfov_up + self.Vfov_down
+        else:
+            self.phi_min = math.radians(-self.Vfov / 2.0)
+            self.phi_max = math.radians(+self.Vfov / 2.0)
         self.d_theta = (self.theta_max - self.theta_min) / self.H
         self.d_phi = (self.phi_max - self.phi_min) / self.V
 
@@ -570,7 +581,10 @@ class ImportantROIWithReliability(Node):
     def _bin_index(self, pts: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         x, y, z = pts[:, 0], pts[:, 1], pts[:, 2]
         r = np.sqrt(x * x + y * y + z * z)
-        theta = np.arctan2(y, x)
+        if self.azimuth_0_to_hfov:
+            theta = np.mod(np.arctan2(y, x), 2.0 * math.pi)
+        else:
+            theta = np.arctan2(y, x)
         xy = np.sqrt(x * x + y * y)
         phi = np.arctan2(z, xy)
 
@@ -773,16 +787,9 @@ class ImportantROIWithReliability(Node):
         eps = 1e-6
         alert_ratio = float(roi_alert.sum() / (roi_imp.sum() + eps))
         alert_ratio_omega = float(np.mean((Rel[Omega] < tau_rel), dtype=np.float64)) if np.any(Omega) else float("nan")
-        # Restore legacy behavior: prefer bins with enough hits (Bn) within Omega
-        frame_mask = (Bn & Omega)
-        if np.any(frame_mask):
-            frame_rel_all = float(np.mean(Rel[frame_mask], dtype=np.float64))
-        elif np.any(Omega):
-            frame_rel_all = float(np.mean(Rel[Omega], dtype=np.float64))
-        elif np.any(M):
-            frame_rel_all = float(np.mean(Rel[M], dtype=np.float64))
-        else:
-            frame_rel_all = 1.0
+        # Old-code denominator mask:
+        # - frame_rel_all: mean over Omega
+        frame_rel_all = float(np.mean(Rel[Omega], dtype=np.float64)) if np.any(Omega) else float("nan")
         frame_rel_obs = float(np.mean(Rel[M], dtype=np.float64)) if np.any(M) else float("nan")
 
         # ---- stats (Chap7) ----
